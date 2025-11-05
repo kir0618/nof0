@@ -323,3 +323,5 @@ Example GitHub Actions workflow:
 |---------|-------------|--------------|
 | 001 | Core domain tables (positions, trades, accounts, etc.) | 2025-11-05 |
 | 002 | Materialized views and refresh helpers | 2025-11-05 |
+| 003 | Fix missing created_at columns in snapshot tables | 2025-11-05 |
+| 004 | Optimize indexes for positions query patterns | 2025-11-05 |

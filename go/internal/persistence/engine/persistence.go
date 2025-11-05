@@ -213,10 +213,17 @@ func (s *Service) RecordAnalytics(ctx context.Context, snapshot managerpkg.Analy
 		ServerTimeMs: time.Now().UTC().UnixMilli(),
 		Metadata:     string(metaBytes),
 	}
-	_, err := s.analyticsModel.Insert(ctx, row)
-	if isUniqueViolation(err) {
-		err = s.analyticsModel.Update(ctx, row)
-	}
+	// Use native UPSERT to avoid race conditions and duplicate key errors
+	query := `
+		INSERT INTO model_analytics (model_id, payload, server_time_ms, metadata, updated_at)
+		VALUES ($1, $2, $3, $4, NOW())
+		ON CONFLICT (model_id) DO UPDATE SET
+			payload = EXCLUDED.payload,
+			server_time_ms = EXCLUDED.server_time_ms,
+			metadata = EXCLUDED.metadata,
+			updated_at = NOW()
+	`
+	_, err := s.sqlConn.ExecCtx(ctx, query, row.ModelId, row.Payload, row.ServerTimeMs, row.Metadata)
 	if err != nil {
 		return err
 	}
