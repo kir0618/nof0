@@ -338,6 +338,8 @@ Cors:
 
 启用Postgres + Redis数据源:
 
+> ⚠️ **安全提示**: 以下示例使用本地开发凭证。生产环境请使用环境变量并参考 `.env.example` 配置真实凭证。
+
 ```yaml
 Postgres:
   DataSource: postgres://nof0:nof0@localhost:5432/nof0?sslmode=disable

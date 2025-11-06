@@ -96,6 +96,13 @@ log/
 .env.test
 .env.production
 .env.*.local
+*.env
+.env.*
+
+# Backup files that might contain secrets
+*.backup
+*.bak.md
+docs/*.backup.md
 
 # Temporary files
 tmp/
