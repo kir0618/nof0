@@ -8,6 +8,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib" // register pgx driver
 	"github.com/zeromicro/go-zero/core/stores/cache"
+	"github.com/zeromicro/go-zero/core/stores/redis"
 	"github.com/zeromicro/go-zero/core/stores/sqlc"
 	"github.com/zeromicro/go-zero/core/stores/sqlx"
 	"github.com/zeromicro/go-zero/core/syncx"
@@ -67,6 +68,8 @@ type ServiceContext struct {
 }
 
 func NewServiceContext(c config.Config, mainConfigPath string) *ServiceContext {
+	configureLogging(c.Logging)
+
 	svc := &ServiceContext{
 		Config:     c,
 		DataLoader: data.NewDataLoader(c.DataPath),
@@ -293,4 +296,17 @@ func filterCacheNodes(conf cache.CacheConf) cache.CacheConf {
 		nodes = append(nodes, node)
 	}
 	return nodes
+}
+
+func configureLogging(cfg config.LoggingConf) {
+	if cfg.SlowThreshold.SQL > 0 {
+		sqlx.SetSlowThreshold(time.Duration(cfg.SlowThreshold.SQL) * time.Millisecond)
+	}
+	if cfg.SlowThreshold.Redis > 0 {
+		redis.SetSlowThreshold(time.Duration(cfg.SlowThreshold.Redis) * time.Millisecond)
+	}
+	if !cfg.VerboseSQL {
+		sqlx.DisableStmtLog()
+	}
+	llmpkg.SetVerboseLogging(cfg.VerboseLLM)
 }

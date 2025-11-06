@@ -35,6 +35,19 @@ type PostgresConf struct {
 	MaxLifetime time.Duration `json:",default=5m"`
 }
 
+// LoggingConf configures logging behavior and thresholds
+type LoggingConf struct {
+	SlowThreshold SlowThresholdConf `json:",optional"`
+	VerboseSQL    bool              `json:",default=false"`
+	VerboseLLM    bool              `json:",default=false"`
+}
+
+// SlowThresholdConf defines millisecond thresholds for slow operation logging
+type SlowThresholdConf struct {
+	SQL   int `json:",default=1000"` // milliseconds
+	Redis int `json:",default=500"`  // milliseconds
+}
+
 type Config struct {
 	rest.RestConf
 	// Env indicates the running environment: test | dev | prod
@@ -44,6 +57,7 @@ type Config struct {
 	Postgres PostgresConf    `json:",optional"`
 	Cache    cache.CacheConf `json:",optional"`
 	TTL      CacheTTL        `json:",optional"`
+	Logging  LoggingConf     `json:",optional"`
 
 	LLM      confkit.Section[llmpkg.Config]      `json:",optional"`
 	Executor confkit.Section[executorpkg.Config] `json:",optional"`

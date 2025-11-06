@@ -62,20 +62,15 @@ func (s *Service) UpsertAssets(ctx context.Context, provider string, assets []ma
 	if s == nil || s.sqlConn == nil || len(assets) == 0 {
 		return nil
 	}
-	stmt := `
-INSERT INTO public.market_assets (
-    provider, symbol, name, sz_decimals, max_leverage, only_isolated, margin_table_id, is_delisted, created_at, updated_at
-) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
-)
-ON CONFLICT (provider, symbol) DO UPDATE SET
-    name = EXCLUDED.name,
-    sz_decimals = EXCLUDED.sz_decimals,
-    max_leverage = EXCLUDED.max_leverage,
-    only_isolated = EXCLUDED.only_isolated,
-    margin_table_id = EXCLUDED.margin_table_id,
-    is_delisted = EXCLUDED.is_delisted,
-    updated_at = NOW();`
+
+	start := time.Now()
+
+	// Prepare batch INSERT with multiple VALUES clauses
+	var valueClauses []string
+	var args []interface{}
+	validAssets := make([]market.Asset, 0, len(assets))
+	argIndex := 1
+
 	for _, asset := range assets {
 		if strings.TrimSpace(asset.Symbol) == "" {
 			continue
@@ -93,7 +88,17 @@ ON CONFLICT (provider, symbol) DO UPDATE SET
 			precision = sql.NullInt64{Int64: int64(asset.Precision), Valid: true}
 		}
 		isDelisted := !asset.IsActive
-		if _, err := s.sqlConn.ExecCtx(ctx, stmt,
+
+		// Build placeholders for this row: ($1, $2, $3, ..., $8)
+		placeholders := make([]string, 8)
+		for i := 0; i < 8; i++ {
+			placeholders[i] = fmt.Sprintf("$%d", argIndex)
+			argIndex++
+		}
+		valueClauses = append(valueClauses, fmt.Sprintf("(%s, NOW(), NOW())", strings.Join(placeholders, ", ")))
+
+		// Append arguments in order
+		args = append(args,
 			provider,
 			asset.Symbol,
 			sql.NullString{String: name, Valid: name != ""},
@@ -102,11 +107,45 @@ ON CONFLICT (provider, symbol) DO UPDATE SET
 			onlyIso,
 			marginTbl,
 			isDelisted,
-		); err != nil {
-			return err
-		}
+		)
+
+		validAssets = append(validAssets, asset)
+	}
+
+	if len(valueClauses) == 0 {
+		logx.WithContext(ctx).Infow("marketpersist: no valid assets to upsert", logx.Field("provider", provider))
+		return nil
+	}
+
+	// Build single batch INSERT statement
+	stmt := fmt.Sprintf(`
+INSERT INTO public.market_assets (
+    provider, symbol, name, sz_decimals, max_leverage, only_isolated, margin_table_id, is_delisted, created_at, updated_at
+) VALUES %s
+ON CONFLICT (provider, symbol) DO UPDATE SET
+    name = EXCLUDED.name,
+    sz_decimals = EXCLUDED.sz_decimals,
+    max_leverage = EXCLUDED.max_leverage,
+    only_isolated = EXCLUDED.only_isolated,
+    margin_table_id = EXCLUDED.margin_table_id,
+    is_delisted = EXCLUDED.is_delisted,
+    updated_at = NOW()`, strings.Join(valueClauses, ", "))
+
+	// Execute single batch INSERT
+	if _, err := s.sqlConn.ExecCtx(ctx, stmt, args...); err != nil {
+		logx.WithContext(ctx).Errorf("marketpersist: batch upsert failed provider=%s count=%d err=%v", provider, len(validAssets), err)
+		return err
+	}
+
+	// Cache each asset in Redis (Redis operations likely still need individual calls)
+	cacheStart := time.Now()
+	for _, asset := range validAssets {
 		s.cacheAsset(ctx, provider, asset)
 	}
+
+	// Log aggregated summary
+	logx.WithContext(ctx).Infof("marketpersist: batch upserted assets provider=%s count=%d sql_duration=%dms cache_duration=%dms total_duration=%dms",
+		provider, len(validAssets), cacheStart.Sub(start).Milliseconds(), time.Since(cacheStart).Milliseconds(), time.Since(start).Milliseconds())
 	return nil
 }
 

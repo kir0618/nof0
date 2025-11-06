@@ -56,25 +56,32 @@ clean: ## Clean build artifacts
 # =============================================================================
 # Database Operations (requires golang-migrate cli and POSTGRES_DSN env var)
 # =============================================================================
-migrate-up: ## Run all pending migrations
+.check-postgres-dsn:
+	@test -n "$(POSTGRES_DSN)" || (echo "\033[31mError: POSTGRES_DSN environment variable is not set\033[0m" && \
+		echo "\033[33mPlease set POSTGRES_DSN with your database connection string.\033[0m" && \
+		echo "\033[33mExample: export POSTGRES_DSN='postgres://user:password@localhost:5432/dbname?sslmode=disable'\033[0m" && \
+		exit 1)
+
+migrate-up: .check-postgres-dsn ## Run all pending migrations
 	migrate -path migrations -database "$(POSTGRES_DSN)" -verbose up
 
-migrate-down: ## Rollback last migration
+migrate-down: .check-postgres-dsn ## Rollback last migration
 	migrate -path migrations -database "$(POSTGRES_DSN)" -verbose down 1
 
 migrate-create: ## Create new migration file (usage: make migrate-create NAME=add_users)
-	@test -n "$(NAME)" || (echo "Error: NAME required. Usage: make migrate-create NAME=add_users" && exit 1)
+	@test -n "$(NAME)" || (echo "\033[31mError: NAME parameter is required\033[0m" && \
+		echo "\033[33mUsage: make migrate-create NAME=add_users\033[0m" && exit 1)
 	migrate create -ext sql -dir migrations -seq $(NAME)
 
-migrate-status: ## Show current migration version
+migrate-status: .check-postgres-dsn ## Show current migration version
 	migrate -path migrations -database "$(POSTGRES_DSN)" version
 
-migrate-force: ## Force migration version (usage: make migrate-force VERSION=2)
-	@test -n "$(VERSION)" || (echo "Error: VERSION required. Usage: make migrate-force VERSION=2" && exit 1)
+migrate-force: .check-postgres-dsn ## Force migration version (usage: make migrate-force VERSION=2)
+	@test -n "$(VERSION)" || (echo "\033[31mError: VERSION parameter is required\033[0m" && \
+		echo "\033[33mUsage: make migrate-force VERSION=2\033[0m" && exit 1)
 	migrate -path migrations -database "$(POSTGRES_DSN)" force $(VERSION)
 
-model-gen: ## Regenerate Go models from database schema
-	@test -n "$(POSTGRES_DSN)" || (echo "Error: POSTGRES_DSN required" && exit 1)
+model-gen: .check-postgres-dsn ## Regenerate Go models from database schema
 	goctl model pg datasource --url "$(POSTGRES_DSN)" --dir internal/model --cache --table "*"
 
 # =============================================================================

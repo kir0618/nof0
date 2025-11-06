@@ -11,8 +11,8 @@ DataPath: ../mcp/data
 Postgres:
   # Example: postgres://user:pass@localhost:5432/nof0?sslmode=disable
   DataSource: "${Postgres__DataSource}"
-  MaxOpen: 10
-  MaxIdle: 5
+  MaxOpen: 25              # Increased for better concurrency with remote DB
+  MaxIdle: 10              # Keep more idle connections
   MaxLifetime: 5m
 
 Cache:
@@ -27,6 +27,14 @@ TTL:
   Short: 10     # seconds for fast-changing data (e.g., prices)
   Medium: 60    # seconds for lists (e.g., trades)
   Long: 300     # seconds for large aggregations
+
+# Logging configuration for performance monitoring
+Logging:
+  SlowThreshold:
+    SQL: 2000      # milliseconds - queries slower than this are logged as slow
+    Redis: 1000     # milliseconds - redis ops slower than this are logged as slow
+  VerboseSQL: false  # set to true for debugging, false in production
+  VerboseLLM: false  # set to true to log full LLM prompts
 
 LLM:
   File: llm.yaml

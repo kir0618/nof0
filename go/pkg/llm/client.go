@@ -18,6 +18,11 @@ import (
 	"github.com/openai/openai-go/shared"
 )
 
+const (
+	maxResponseLogLen = 200
+	maxPromptLogLen   = 100
+)
+
 // LLMClient defines the supported client behaviours.
 type LLMClient interface {
 	Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error)
@@ -222,6 +227,10 @@ func (c *Client) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, err
 	respText := ""
 	if len(result.Choices) > 0 {
 		respText = strings.TrimSpace(result.Choices[0].Message.Content)
+		// Limit response text length in logs unless verbose logging explicitly enabled
+		if len(respText) > maxResponseLogLen && !isVerboseLoggingEnabled() {
+			respText = respText[:maxResponseLogLen] + "..."
+		}
 	}
 	c.logger.Info(ctx, "llm chat success", Fields{
 		"model":             modelID,
@@ -360,7 +369,11 @@ func summarizeMessages(msgs []Message) string {
 		if role == "" {
 			role = "user"
 		}
-		parts = append(parts, fmt.Sprintf("[%d] role=%s content=%s", i, role, strings.TrimSpace(m.Content)))
+		content := strings.TrimSpace(m.Content)
+		if len(content) > maxPromptLogLen && !isVerboseLoggingEnabled() {
+			content = content[:maxPromptLogLen] + "..."
+		}
+		parts = append(parts, fmt.Sprintf("[%d] role=%s content=%s", i, role, content))
 	}
 	return strings.Join(parts, " | ")
 }
