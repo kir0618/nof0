@@ -31,8 +31,8 @@ TTL:
 # Logging configuration for performance monitoring
 Logging:
   SlowThreshold:
-    SQL: 2000      # milliseconds - queries slower than this are logged as slow
-    Redis: 1000     # milliseconds - redis ops slower than this are logged as slow
+    SQL: 10000      # milliseconds - queries slower than this are logged as slow
+    Redis: 5000     # milliseconds - redis ops slower than this are logged as slow
   VerboseSQL: false  # set to true for debugging, false in production
   VerboseLLM: false  # set to true to log full LLM prompts
 

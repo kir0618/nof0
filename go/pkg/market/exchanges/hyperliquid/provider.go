@@ -13,7 +13,7 @@ import (
 	"nof0-api/pkg/market"
 )
 
-const defaultProviderTimeout = 8 * time.Second
+const defaultProviderTimeout = market.DefaultProviderTimeout
 
 // Provider wraps Hyperliquid client calls behind the generic market.Provider contract.
 type Provider struct {

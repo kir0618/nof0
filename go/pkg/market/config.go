@@ -19,6 +19,13 @@ type Config struct {
 	Providers map[string]*ProviderConfig `yaml:"providers"`
 }
 
+const (
+	// DefaultProviderTimeout defines the per-call timeout applied when none is supplied in configuration.
+	DefaultProviderTimeout = 8 * time.Second
+	// DefaultProviderHTTPTimeout defines the HTTP client timeout used when none is supplied in configuration.
+	DefaultProviderHTTPTimeout = 10 * time.Second
+)
+
 // ProviderConfig represents configuration for a single market provider.
 type ProviderConfig struct {
 	Type    string `yaml:"type"`
@@ -131,6 +138,9 @@ func (p *ProviderConfig) parseDurations(name string) error {
 		}
 		p.Timeout = d
 	}
+	if p.Timeout <= 0 {
+		p.Timeout = DefaultProviderTimeout
+	}
 	if p.HTTPTimeoutRaw != "" {
 		d, err := time.ParseDuration(p.HTTPTimeoutRaw)
 		if err != nil {
@@ -140,6 +150,9 @@ func (p *ProviderConfig) parseDurations(name string) error {
 			return fmt.Errorf("market provider %s: http_timeout must be positive, got %s", name, d)
 		}
 		p.HTTPTimeout = d
+	}
+	if p.HTTPTimeout <= 0 {
+		p.HTTPTimeout = DefaultProviderHTTPTimeout
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -13,10 +14,17 @@ import (
 	"github.com/zeromicro/go-zero/core/logx"
 	gocache "github.com/zeromicro/go-zero/core/stores/cache"
 	"github.com/zeromicro/go-zero/core/stores/sqlx"
+	"golang.org/x/sync/errgroup"
 
 	cachekeys "nof0-api/internal/cache"
 	"nof0-api/internal/model"
 	"nof0-api/pkg/market"
+)
+
+const (
+	assetSQLTimeout   = 30 * time.Second
+	assetCacheTimeout = 30 * time.Second
+	cacheWorkerLimit  = 32
 )
 
 // Service implements market data persistence and caching hooks.
@@ -131,21 +139,28 @@ ON CONFLICT (provider, symbol) DO UPDATE SET
     is_delisted = EXCLUDED.is_delisted,
     updated_at = NOW()`, strings.Join(valueClauses, ", "))
 
-	// Execute single batch INSERT
-	if _, err := s.sqlConn.ExecCtx(ctx, stmt, args...); err != nil {
-		logx.WithContext(ctx).Errorf("marketpersist: batch upsert failed provider=%s count=%d err=%v", provider, len(validAssets), err)
+	sqlCtx, sqlCancel := context.WithTimeout(context.Background(), assetSQLTimeout)
+	defer sqlCancel()
+	queryStart := time.Now()
+	if _, err := s.sqlConn.ExecCtx(sqlCtx, stmt, args...); err != nil {
+		logx.WithContext(sqlCtx).Errorf("marketpersist: batch upsert failed provider=%s count=%d err=%v", provider, len(validAssets), err)
 		return err
 	}
+	sqlDuration := time.Since(queryStart)
 
-	// Cache each asset in Redis (Redis operations likely still need individual calls)
+	cacheCtx, cacheCancel := context.WithTimeout(context.Background(), assetCacheTimeout)
+	defer cacheCancel()
 	cacheStart := time.Now()
-	for _, asset := range validAssets {
-		s.cacheAsset(ctx, provider, asset)
+	if err := s.cacheAssets(cacheCtx, provider, validAssets); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			logx.WithContext(cacheCtx).Errorf("marketpersist: cache assets timed out provider=%s count=%d err=%v", provider, len(validAssets), err)
+		}
+		return err
 	}
+	cacheDuration := time.Since(cacheStart)
 
-	// Log aggregated summary
 	logx.WithContext(ctx).Infof("marketpersist: batch upserted assets provider=%s count=%d sql_duration=%dms cache_duration=%dms total_duration=%dms",
-		provider, len(validAssets), cacheStart.Sub(start).Milliseconds(), time.Since(cacheStart).Milliseconds(), time.Since(start).Milliseconds())
+		provider, len(validAssets), sqlDuration.Milliseconds(), cacheDuration.Milliseconds(), time.Since(start).Milliseconds())
 	return nil
 }
 
@@ -234,9 +249,31 @@ func (s *Service) RecordPriceSeries(ctx context.Context, provider string, symbol
 	return nil
 }
 
-func (s *Service) cacheAsset(ctx context.Context, provider string, asset market.Asset) {
+func (s *Service) cacheAssets(ctx context.Context, provider string, assets []market.Asset) error {
+	if s.cache == nil || len(assets) == 0 {
+		return nil
+	}
+	g, gctx := errgroup.WithContext(ctx)
+	if cacheWorkerLimit > 0 {
+		g.SetLimit(cacheWorkerLimit)
+	}
+	for _, asset := range assets {
+		asset := asset
+		g.Go(func() error {
+			if err := s.cacheAsset(gctx, provider, asset); err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return err
+				}
+			}
+			return nil
+		})
+	}
+	return g.Wait()
+}
+
+func (s *Service) cacheAsset(ctx context.Context, provider string, asset market.Asset) error {
 	if s.cache == nil {
-		return
+		return nil
 	}
 	key := cachekeys.MarketAssetKey(provider, asset.Symbol)
 	ttl := s.ttl.Duration(cachekeys.TTLLong)
@@ -254,7 +291,9 @@ func (s *Service) cacheAsset(ctx context.Context, provider string, asset market.
 	}
 	if err := s.cache.SetWithExpireCtx(ctx, key, payload, ttl); err != nil {
 		logx.WithContext(ctx).Errorf("marketpersist: cache asset key=%s err=%v", key, err)
+		return err
 	}
+	return nil
 }
 
 func (s *Service) cachePrice(ctx context.Context, provider, symbol string, price float64, ts time.Time) {
