@@ -1,6 +1,9 @@
 .PHONY: help deps run build build-linux build-windows clean \
+	docker-up docker-down docker-reset docker-logs docker-ps \
+	db-local-migrate db-local-reset db-local-status \
 	migrate-up migrate-down migrate-create migrate-status migrate-force model-gen \
-	test test-unit test-integration test-all test-bench test-cover test-race \
+	test test-unit test-integration test-all test-bench test-cover test-race test-storage \
+	run-llm run-llm-fast \
 	lint fmt check check-all install
 
 # =============================================================================
@@ -10,6 +13,7 @@ APP_NAME=nof0-api
 CONFIG_FILE=etc/nof0.yaml
 BUILD_DIR=bin
 TEST_SCRIPT=scripts/run_tests.py
+LOCAL_POSTGRES_DSN=postgres://nof0:nof0@localhost:5432/nof0?sslmode=disable
 
 # =============================================================================
 # Help and Documentation
@@ -30,6 +34,12 @@ deps: ## Install dependencies
 # =============================================================================
 run: ## Run the application in development mode
 	go run nof0.go -f $(CONFIG_FILE)
+
+run-llm: ## Run LLM trading manager with default settings
+	go run cmd/llm/main.go --equity 100 --symbols BTC,ETH --paper-trading
+
+run-llm-fast: ## Run LLM trading manager with fast executor profile
+	go run cmd/llm/main.go --executor-prompt-profile fast --equity 100 --symbols BTC,ETH --paper-trading
 
 # =============================================================================
 # Build Commands
@@ -52,6 +62,41 @@ build-windows: ## Build for Windows
 clean: ## Clean build artifacts
 	rm -rf $(BUILD_DIR)
 	go clean
+
+# =============================================================================
+# Docker Infrastructure
+# =============================================================================
+docker-up: ## Start postgres and redis containers
+	docker-compose up -d postgres redis
+
+docker-down: ## Stop all docker containers
+	docker-compose down
+
+docker-reset: ## Reset database (drops and recreates)
+	docker exec nof0-postgres psql -U nof0 -d postgres -c "DROP DATABASE IF EXISTS nof0;"
+	docker exec nof0-postgres psql -U nof0 -d postgres -c "CREATE DATABASE nof0;"
+	@echo "\033[32mDatabase reset complete. Run 'make db-local-migrate' to apply migrations.\033[0m"
+
+docker-logs: ## Show docker container logs
+	docker-compose logs -f postgres redis
+
+docker-ps: ## Show docker container status
+	docker-compose ps
+
+# =============================================================================
+# Local Development Database
+# =============================================================================
+db-local-migrate: ## Run migrations on local docker database
+	@echo "\033[36mRunning migrations on local database...\033[0m"
+	POSTGRES_DSN="$(LOCAL_POSTGRES_DSN)" $(MAKE) migrate-up
+
+db-local-reset: docker-reset ## Reset and migrate local database
+	@echo "\033[36mApplying migrations...\033[0m"
+	@sleep 2
+	$(MAKE) db-local-migrate
+
+db-local-status: ## Show migration status of local database
+	POSTGRES_DSN="$(LOCAL_POSTGRES_DSN)" $(MAKE) migrate-status
 
 # =============================================================================
 # Database Operations (requires golang-migrate cli and POSTGRES_DSN env var)
@@ -109,6 +154,11 @@ test-cover: ## Generate test coverage report
 
 test-race: ## Run tests with race detector
 	go test -race ./...
+
+test-storage: ## Run storage integration tests (requires docker services)
+	@echo "\033[36mRunning storage integration tests...\033[0m"
+	@echo "\033[33mNote: Ensure docker services are running (make docker-up)\033[0m"
+	go test -tags=integration -v ./test/storage_integration_test.go
 
 # =============================================================================
 # Code Quality
