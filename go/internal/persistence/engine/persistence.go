@@ -308,9 +308,9 @@ func (s *Service) hydratePositions(ctx context.Context, traderIDs []string) erro
 		}
 		s.persistPositionCache(ctx, modelID, entries)
 	}
-	for modelID := range remaining {
-		s.persistPositionCache(ctx, modelID, nil)
-	}
+	// Skip deleting cache for traders with no positions during hydration.
+	// Cache entries will naturally expire via TTL, avoiding unnecessary Del operations
+	// that can trigger circuit breaker issues during startup.
 	return nil
 }
 
@@ -339,6 +339,11 @@ func (s *Service) hydrateTrades(ctx context.Context, traderIDs []string) error {
 		records, err := s.tradesModel.RecentByModel(ctx, modelID, recentTradesLimit)
 		if err != nil {
 			return err
+		}
+		// Only persist cache if there are trades to cache.
+		// Skip Del operations during hydration to avoid circuit breaker issues.
+		if len(records) == 0 {
+			continue
 		}
 		entries := make([]tradeCacheEntry, 0, len(records))
 		for _, rec := range records {

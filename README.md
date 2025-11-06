@@ -66,8 +66,8 @@ NOF0 不是传统的回测工具，而是一个 **以 Prompt 为中心的交易�
 ### 开发进度
 
 - 前端：100%（可独立运行，不依赖后端）
-- 后端：30%
-- AI 工作流引擎：50%
+- 后端：60%
+- AI 工作流引擎：80%
 
 ## 项目结构
 
@@ -120,15 +120,7 @@ npm run dev
 
 ### 3. 启动后端（可选）
 
-```bash
-cd go
-go build -o nof0-api ./nof0.go
-./nof0-api -f etc/nof0.yaml
-```
-
-服务运行在 `http://localhost:8888`
-
-> 完整后端文档见 [go/README.md](go/README.md)
+> 尚未开发完毕，欢迎加入tg群获取开发进度通知：https://t.me/nof0_ai
 
 ## 技术栈
 
@@ -182,7 +174,7 @@ npm run snapshot:nof1
 
 ## 相关资源
 
-- [📚 完整文档](https://wquguru.gitbook.io/nof0) - GitBook 在线文档
+- [完整文档](https://wquguru.gitbook.io/nof0) - GitBook 在线文档
 - [NOF1 官方网站](https://nof1.ai/) - 原版 Alpha Arena
 - [后端完整文档](go/README.md) - Go 服务详细说明
 - [Go-Zero 框架](https://go-zero.dev/) - 微服务框架文档
