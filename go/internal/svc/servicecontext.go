@@ -153,6 +153,16 @@ func NewServiceContext(c config.Config, mainConfigPath string) *ServiceContext {
 		svc.ExecutorConfig = executorCfg
 	}
 
+	var managerPromptGuard *llmpkg.TemplateVersionGuard
+	if executorCfg != nil {
+		managerPromptGuard = &llmpkg.TemplateVersionGuard{
+			Component:            "manager.prompt",
+			ExpectedVersion:      executorCfg.PromptSchemaVersion,
+			RequireVersionHeader: executorCfg.PromptValidation.RequireVersionHeader,
+			StrictMode:           executorCfg.PromptValidation.StrictMode,
+		}
+	}
+
 	// Load Manager config if specified
 	managerCfg := c.Manager.Value
 	if managerCfg == nil && c.Manager.File != "" {
@@ -170,7 +180,7 @@ func NewServiceContext(c config.Config, mainConfigPath string) *ServiceContext {
 		digests := make(map[string]string, len(managerCfg.Traders))
 		for i := range managerCfg.Traders {
 			tr := &managerCfg.Traders[i]
-			renderer, err := managerpkg.NewPromptRenderer(tr.PromptTemplate)
+			renderer, err := managerpkg.NewPromptRenderer(tr.PromptTemplate, managerPromptGuard)
 			if err != nil {
 				log.Fatalf("failed to init manager prompt renderer for trader %s: %v", tr.ID, err)
 			}

@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -18,6 +19,11 @@ func TestPromptRenderer(t *testing.T) {
 		DecisionIntervalRaw:    "3m",
 		DecisionTimeoutRaw:     "60s",
 		MaxConcurrentDecisions: 1,
+		PromptSchemaVersion:    "v1.0.0",
+		PromptValidation: PromptValidation{
+			StrictMode:           true,
+			RequireVersionHeader: true,
+		},
 	}
 	renderer, err := NewPromptRenderer(cfg, templatePath)
 	assert.NoError(t, err, "NewPromptRenderer should not error")
@@ -72,4 +78,52 @@ func TestPromptRendererEmptyPath(t *testing.T) {
 	}
 	_, err := NewPromptRenderer(cfg, " ")
 	assert.Error(t, err, "NewPromptRenderer should error for empty template path")
+}
+
+func TestPromptRendererVersionMismatchStrict(t *testing.T) {
+	path := writeTempTemplate(t, "{{/* Version: v0.9.0 */}}\nbody")
+	cfg := &Config{
+		PromptSchemaVersion: "v1.0.0",
+		PromptValidation: PromptValidation{
+			StrictMode:           true,
+			RequireVersionHeader: true,
+		},
+	}
+	_, err := NewPromptRenderer(cfg, path)
+	assert.ErrorContains(t, err, "declared version v0.9.0")
+}
+
+func TestPromptRendererVersionMismatchNonStrict(t *testing.T) {
+	path := writeTempTemplate(t, "{{/* Version: v0.9.0 */}}\nbody")
+	cfg := &Config{
+		PromptSchemaVersion: "v1.0.0",
+		PromptValidation: PromptValidation{
+			StrictMode:           false,
+			RequireVersionHeader: true,
+		},
+	}
+	_, err := NewPromptRenderer(cfg, path)
+	assert.NoError(t, err, "non-strict mode should allow version mismatch")
+}
+
+func TestPromptRendererMissingVersionHeader(t *testing.T) {
+	path := writeTempTemplate(t, "No header here")
+	cfg := &Config{
+		PromptSchemaVersion: "v1.0.0",
+		PromptValidation: PromptValidation{
+			StrictMode:           true,
+			RequireVersionHeader: true,
+		},
+	}
+	_, err := NewPromptRenderer(cfg, path)
+	assert.ErrorContains(t, err, "missing Version header")
+}
+
+func writeTempTemplate(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "prompt.tmpl")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write temp template: %v", err)
+	}
+	return path
 }

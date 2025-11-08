@@ -9,3 +9,7 @@ max_concurrent_decisions: 1
 allowed_trader_ids: []
 signing_key: ""
 overrides: {}
+prompt_schema_version: "v1.0.0"
+prompt_validation:
+  strict_mode: true
+  require_version_header: true

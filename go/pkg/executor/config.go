@@ -26,11 +26,19 @@ type Config struct {
 	AllowedTraderIDs       []string            `yaml:"allowed_trader_ids"`
 	SigningKey             string              `yaml:"signing_key"`
 	Overrides              map[string]Override `yaml:"overrides"`
+	PromptSchemaVersion    string              `yaml:"prompt_schema_version"`
+	PromptValidation       PromptValidation    `yaml:"prompt_validation"`
 	TraderID               string              `yaml:"-"` // runtime-only metadata for persistence hooks
 
 	DecisionIntervalRaw string `yaml:"decision_interval"`
 	DecisionTimeoutRaw  string `yaml:"decision_timeout"`
 	minRiskRewardSet    bool
+}
+
+// PromptValidation encapsulates prompt schema validation toggles.
+type PromptValidation struct {
+	StrictMode           bool `yaml:"strict_mode"`
+	RequireVersionHeader bool `yaml:"require_version_header"`
 }
 
 // Override allows per-trader or per-symbol overrides of core thresholds.
@@ -105,6 +113,7 @@ func (c *Config) applyDefaults() {
 	if !c.minRiskRewardSet && c.MinRiskReward <= 0 {
 		c.MinRiskReward = 3.0
 	}
+	c.PromptSchemaVersion = strings.TrimSpace(c.PromptSchemaVersion)
 }
 
 func (c *Config) parseDurations() error {
@@ -129,6 +138,9 @@ func (c *Config) parseDurations() error {
 
 func (c *Config) expandFields() {
 	c.SigningKey = strings.TrimSpace(os.ExpandEnv(c.SigningKey))
+	if c.PromptSchemaVersion != "" {
+		c.PromptSchemaVersion = strings.TrimSpace(c.PromptSchemaVersion)
+	}
 	for i, id := range c.AllowedTraderIDs {
 		c.AllowedTraderIDs[i] = strings.TrimSpace(id)
 	}
@@ -150,6 +162,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxPositions <= 0 {
 		return errors.New("executor config: max_positions must be positive")
+	}
+	if c.PromptValidation.RequireVersionHeader && strings.TrimSpace(c.PromptSchemaVersion) == "" {
+		return errors.New("executor config: prompt_schema_version is required when prompt_validation.require_version_header is true")
 	}
 	if len(c.AllowedTraderIDs) > 0 {
 		seen := make(map[string]struct{}, len(c.AllowedTraderIDs))

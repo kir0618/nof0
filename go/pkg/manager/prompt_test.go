@@ -1,16 +1,19 @@
 package manager
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	"nof0-api/pkg/llm"
 )
 
 func TestManagerPromptRenderer(t *testing.T) {
 	templatePath := filepath.Join("..", "..", "etc", "prompts", "manager", "aggressive_short.tmpl")
-	renderer, err := NewPromptRenderer(templatePath)
+	renderer, err := NewPromptRenderer(templatePath, nil)
 	assert.NoError(t, err, "NewPromptRenderer should not error")
 	assert.NotNil(t, renderer, "renderer should not be nil")
 
@@ -58,10 +61,52 @@ func TestManagerPromptRenderer(t *testing.T) {
 
 func TestManagerPromptRendererMissingTrader(t *testing.T) {
 	templatePath := filepath.Join("..", "..", "etc", "prompts", "manager", "aggressive_short.tmpl")
-	renderer, err := NewPromptRenderer(templatePath)
+	renderer, err := NewPromptRenderer(templatePath, nil)
 	assert.NoError(t, err, "NewPromptRenderer should not error")
 	assert.NotNil(t, renderer, "renderer should not be nil")
 
 	_, err = renderer.Render(ManagerPromptInputs{})
 	assert.Error(t, err, "Render should error for missing trader data")
+}
+
+func TestManagerPromptRendererVersionMismatchStrict(t *testing.T) {
+	path := writeTempManagerTemplate(t, "{{/* Version: v0.9.0 */}}\nbody")
+	guard := &llm.TemplateVersionGuard{
+		ExpectedVersion:      "v1.0.0",
+		RequireVersionHeader: true,
+		StrictMode:           true,
+	}
+	_, err := NewPromptRenderer(path, guard)
+	assert.ErrorContains(t, err, "declared version v0.9.0")
+}
+
+func TestManagerPromptRendererVersionMismatchNonStrict(t *testing.T) {
+	path := writeTempManagerTemplate(t, "{{/* Version: v0.9.0 */}}\nbody")
+	guard := &llm.TemplateVersionGuard{
+		ExpectedVersion:      "v1.0.0",
+		RequireVersionHeader: true,
+		StrictMode:           false,
+	}
+	_, err := NewPromptRenderer(path, guard)
+	assert.NoError(t, err)
+}
+
+func TestManagerPromptRendererMissingHeader(t *testing.T) {
+	path := writeTempManagerTemplate(t, "no metadata")
+	guard := &llm.TemplateVersionGuard{
+		ExpectedVersion:      "v1.0.0",
+		RequireVersionHeader: true,
+		StrictMode:           true,
+	}
+	_, err := NewPromptRenderer(path, guard)
+	assert.ErrorContains(t, err, "missing Version header")
+}
+
+func writeTempManagerTemplate(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "manager_prompt.tmpl")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write temp manager template: %v", err)
+	}
+	return path
 }
