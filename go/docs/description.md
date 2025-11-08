@@ -31,6 +31,16 @@
 
 * 默认禁用一键全部平仓功能，只能针对trader拥有的虚拟仓位进行平仓操作
 
+### 架构层级概览
+
+1. **接口层（internal/handler, internal/logic）**：通过 go-zero 提供 REST API，仅做数据读取与入参校验，所有业务态由下层生成。
+2. **服务编排层（internal/svc）**：集中加载配置、构造 DataLoader、LLM/Executor/Manager/Provider，确保跨模块引用在进程启动时即被验证。
+3. **执行引擎（pkg/manager, pkg/executor, pkg/exchange, pkg/market, pkg/llm）**：实现交易决策、风控、行情/交易所抽象与大模型调用，是系统稳健性的核心。
+4. **数据与持久化层（internal/persistence, internal/cache, docs/migrations 等）**：负责 Postgres/Redis/JSON/Journaling 的一致性写入与回放。
+5. **工具与任务层（cmd/*, scripts/, pkg/backtest）**：提供 cron 监控、数据导入、回测等外围能力，用于维持数据新鲜度和快速恢复。
+
+> 该分层保证了“控制面（API）”与“执行面（引擎）”的清晰边界，任何一层故障都可以通过上/下游的缓存与文件导出机制进行降级。
+
 ## 执行引擎
 
 ### 模块
@@ -72,6 +82,23 @@ pkg/journal:
 
 * 独立的日志器，记录交易周期
 
+### 运行期生命周期
+
+1. **引导阶段**
+   - `internal/svc` 加载主配置以及引用的 LLM/Executor/Manager/Exchange/Market 子配置，解析 BaseDir，验证 provider ID 是否一致。
+   - 依据配置是否提供 Postgres/Redis DSN，按需初始化连接池与缓存 TTL 集合，并注入可选的数据库模型。
+   - 构造 `data.DataLoader` 指向 `DataPath`，即便数据库暂不可用，API 仍能读取 JSON 数据对外服务。
+2. **Trader 装配阶段**
+   - `pkg/manager` 遍历 `manager.yaml` 中的 trader，绑定具体的 market/exchange provider，实例化与 trader 风控参数一致的 executor。
+   - `ManagerPromptRenderers` 与 prompt digest 被缓存，避免 runtime 模板解析抖动。
+3. **主循环阶段**
+   - `Manager.RunTradingLoop` 以 1s tick 轮询活跃 trader，根据决策间隔、Sharpe gating、冷却期等条件判断是否触发一次决策。
+   - `Executor.GetFullDecision` 渲染 prompt → 调用 LLM → 验证结构化输出；失败记录会增加 symbol 级失败计数，防止抖动。
+   - 决策落地后，`PersistenceService` 把仓位事件、决策周期、账户快照、分析指标写入 Postgres/Redis，并触发 Journal 写入。
+4. **数据导出阶段**
+   - 定时任务或专用 exporter 将 Redis/DB 中的最新状态渲染成 MCP JSON 文件，供 API 与外部系统消费。
+   - `cmd/importer` 可以将 JSON 重新写回数据库，形成“可回放”的闭环，支持灾备或重建环境。
+
 ### 流程
 
 主流程：
@@ -80,6 +107,13 @@ pkg/journal:
 2. 从数据库加载状态信息：trader 净值余额、当前仓位、指标参数、历史仓位等
 3. 获取历史行情，更新状态信息，如trader的净值余额，当前仓位盈亏
 4. 定时获取并执行最新交易决策
+
+补充流程细节：
+
+* **启动自检**：ServiceContext 在加载各模块配置时会立即 panic 未找到的 provider 或缺失的 BaseDir，阻止带病上线；`configureLogging` 同步设置 SQL/Redis 慢日志阈值。
+* **账户同步**：`SyncTraderPositions` 调用 exchange provider 的 `GetPositions` 和 `GetAccountState`，并把净值/保证金快照写入 Redis `trader:{id}:*` key，供其它组件复用。
+* **风控闭环**：Executor 校验 MinConfidence、MaxPositions 等软限制，Manager 在执行时再次检查 `MaxPositionSizeUSD`、Sharpe gating、冷却期，实现“双重保险”。
+* **失败降级**：LLM/交易所调用失败只会影响当前 trader 的决策；PersistenceService 出错会记录日志但不会阻塞下一周期，保证整体决策循环持续推进。
 
 数据表存储：
 
@@ -730,6 +764,9 @@ TTL:
 - **失败处理**：
   - 持久化失败仅记录日志，不阻塞交易
   - 超时机制：数据库3s，Redis 5s
+- **状态重建**：
+  - `cmd/importer` 可以从 MCP JSON 全量导入 Postgres，结合 Redis Key TTL，可在冷启动/集群扩容时快速回放最近状态。
+  - `ManagerTraderExchange/Market` 的映射缓存于 ServiceContext，若配置或 provider 发生漂移，重启即可恢复一致性。
 
 #### 6. 性能优化措施
 
@@ -738,3 +775,28 @@ TTL:
 - **并发worker**：市场数据并发拉取（参考recent commit: "optimize asset caching with concurrent workers"）
 - **哈希缓存**：Redis Hash存储资产价格，减少键数量
 - **超时控制**：所有操作设置合理超时（见配置章节）
+
+## 稳健性与运维
+
+1. **依赖矩阵**
+   | 组件 | 强依赖 | 弱依赖 | 说明 |
+   | --- | --- | --- | --- |
+   | API 进程 | JSON 文件、配置 | Postgres/Redis（可选） | JSON 作为权威数据源，DB/Cache 仅在提供 DSN 时启用 |
+   | 执行引擎 | Redis、Exchange/Market API、LLM | Postgres | Redis + provider 决定实时性，Postgres 失败会降级为日志告警 |
+   | Cron/Importer | Exchange/Market、Postgres | JSON 文件 | 监控与数据导入程序可在独立节点运行 |
+2. **配置治理**
+   - 所有 `etc/*.yaml` 均支持 `${ENV_VAR}` 注入，配合 go-zero `conf.UseEnv()` 实现 12-factor。
+   - `manager.yaml` 中的 provider id 会在 ServiceContext 启动时强校验，避免运行时才发现引用不存在。
+   - TTL、日志阈值等运行参数集中于 `etc/nof0.yaml`，可以通过环境覆盖，保证跨环境一致性。
+3. **监控与告警**
+   - `pkg/manager`、`pkg/executor` 使用 `logx` 的 Slowf/Ginfof 记录关键事件，可接入 go-zero 的 ELK/Stackdriver。
+   - `manager.monitoring` 配置支持 Prometheus exporter 与 webhook；cron 任务提供市场/交易所探活日志。
+4. **故障应对策略**
+   - **LLM 异常**：Executor 的重试策略由 `pkg/llm` 中的 `RetryHandler` 控制，可根据模型成本调优。
+   - **交易所 API 故障**：`exchange.Provider` 抽象允许在 `manager.yaml` 中把 trader 快速迁移到 `sim` provider，保留决策链完整性。
+   - **数据库/缓存中断**：PersistenceService 捕获错误后仅打印日志；API 依旧消费 JSON，对外可用性不受影响。
+5. **部署与启动顺序**
+   - 先部署执行引擎（或 cron/importer）以保证 Redis/JSON 中存在最新数据，再启动 API 进程。
+   - 对于单进程 all-in-one 场景，可使用 `nof0.go` 启动 API，同时通过 manager CLI 在旁运行 Trader 循环；由于分层清晰，也支持拆分为独立容器。
+
+通过上述分层、流程与运行保障的补充，文档与仓库实现之间形成一套可验证的契约，能够指导新成员在开发、部署、扩容、故障恢复等环节保持同样的稳健性假设。
