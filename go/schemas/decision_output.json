@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "signal",
+    "symbol",
+    "leverage",
+    "position_size_usd",
+    "entry_price",
+    "stop_loss",
+    "take_profit",
+    "risk_usd",
+    "confidence",
+    "invalidation_condition",
+    "reasoning"
+  ],
+  "properties": {
+    "signal": {
+      "type": "string",
+      "enum": ["buy_to_enter", "sell_to_enter", "hold", "close"]
+    },
+    "symbol": { "type": "string", "minLength": 1 },
+    "leverage": { "type": "integer", "minimum": 0 },
+    "position_size_usd": { "type": "number", "minimum": 0 },
+    "entry_price": { "type": "number", "minimum": 0 },
+    "stop_loss": { "type": "number", "minimum": 0 },
+    "take_profit": { "type": "number", "minimum": 0 },
+    "risk_usd": { "type": "number", "minimum": 0 },
+    "confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
+    "invalidation_condition": { "type": "string" },
+    "reasoning": { "type": "string" }
+  },
+  "additionalProperties": false
+}

@@ -2,7 +2,9 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"time"
@@ -32,6 +34,7 @@ type BasicExecutor struct {
 	modelAlias    string
 	failures      map[string]int
 	conversations ConversationRecorder
+	schemaChecker *JSONSchemaValidator
 }
 
 // NewExecutor constructs a BasicExecutor. The templatePath is the executor prompt template provided by caller.
@@ -46,6 +49,15 @@ func NewExecutor(cfg *Config, client llm.LLMClient, templatePath string, modelAl
 	if err != nil {
 		return nil, err
 	}
+	var schemaChecker *JSONSchemaValidator
+	if cfg.OutputValidation.Enabled {
+		validator, err := NewJSONSchemaValidator(cfg.OutputValidation.SchemaPath)
+		if err != nil {
+			return nil, err
+		}
+		schemaChecker = validator
+	}
+
 	exec := &BasicExecutor{
 		cfg:           cfg,
 		llm:           client,
@@ -53,6 +65,7 @@ func NewExecutor(cfg *Config, client llm.LLMClient, templatePath string, modelAl
 		modelAlias:    strings.TrimSpace(modelAlias),
 		failures:      make(map[string]int),
 		conversations: noopConversationRecorder{},
+		schemaChecker: schemaChecker,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -131,7 +144,15 @@ func (e *BasicExecutor) GetFullDecision(input *Context) (*FullDecision, error) {
 	logx.WithContext(callCtx).Infof("executor: chat completed digest=%s duration=%s", promptDigest, time.Since(callStart))
 	e.recordConversation(callCtx, promptStr, resp)
 
-	// Phase 3: Map & validate.
+	// Phase 3: Schema validation (optional) and logical validation.
+	if err := e.validateSchema(resp, out); err != nil {
+		if e.cfg.OutputValidation.FailOnInvalid {
+			return &FullDecision{UserPrompt: promptStr, CoTTrace: "", Decisions: nil, Timestamp: time.Now()}, err
+		}
+		logx.Slowf("executor: schema validation warning digest=%s err=%v", promptDigest, err)
+	}
+
+	// Map & validate execution constraints.
 	mapped := mapDecisionContract(out, input.Positions)
 	if err := ValidateDecisions(e.cfg, input, []Decision{mapped}); err != nil {
 		e.trackFailure(mapped.Symbol, err)
@@ -153,6 +174,27 @@ func condPerf(p *PerformanceView) *PerformanceView {
 		return p
 	}
 	return &PerformanceView{}
+}
+
+func (e *BasicExecutor) validateSchema(resp *llm.ChatResponse, contract decisionContract) error {
+	if e == nil || e.schemaChecker == nil {
+		return nil
+	}
+	var raw []byte
+	if resp != nil && len(resp.Choices) > 0 {
+		content := strings.TrimSpace(resp.Choices[0].Message.Content)
+		if content != "" {
+			raw = []byte(content)
+		}
+	}
+	if len(raw) == 0 {
+		payload, err := json.Marshal(contract)
+		if err != nil {
+			return fmt.Errorf("executor: marshal decision for schema validation: %w", err)
+		}
+		raw = payload
+	}
+	return e.schemaChecker.ValidateBytes(raw)
 }
 
 func (e *BasicExecutor) logInputWarnings(input *Context) {

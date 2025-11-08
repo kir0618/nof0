@@ -39,6 +39,7 @@ type Client struct {
 	logger       Logger
 	retryHandler *RetryHandler
 	httpClient   *http.Client
+	budget       *BudgetGuard
 	// defaultRouting is applied when using zenmux/auto with no explicit Routing provided
 	defaultRouting *RoutingConfig
 }
@@ -132,12 +133,18 @@ func NewClient(cfg *Config, opts ...ClientOption) (*Client, error) {
 		oaClient = &clientVal
 	}
 
+	var budgetGuard *BudgetGuard
+	if clientCfg.Budget != nil {
+		budgetGuard = NewBudgetGuard(clientCfg.Budget)
+	}
+
 	c := &Client{
 		config:       clientCfg,
 		openaiClient: oaClient,
 		logger:       logger,
 		retryHandler: retryHandler,
 		httpClient:   optState.httpClient,
+		budget:       budgetGuard,
 	}
 
 	// NOTE: zenmux/auto routing is currently unstable (returns HTTP 500).
@@ -179,7 +186,15 @@ func (c *Client) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, err
 	if req == nil {
 		return nil, errors.New("llm: request cannot be nil")
 	}
-	params, modelID, err := c.buildChatParams(req)
+	if c.budget != nil {
+		if err := c.budget.AllowAttempt(); err != nil {
+			c.logger.Warn(ctx, "llm budget exhausted", Fields{
+				"model": strings.TrimSpace(req.Model),
+			})
+			return nil, err
+		}
+	}
+	params, modelAlias, modelID, err := c.buildChatParams(req)
 	if err != nil {
 		return nil, err
 	}
@@ -239,6 +254,31 @@ func (c *Client) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, err
 		"completion_tokens": result.Usage.CompletionTokens,
 		"response":          respText,
 	})
+
+	if c.budget != nil {
+		tokens := int64(result.Usage.TotalTokens)
+		if tokens > 0 {
+			snapshot, err := c.budget.RecordUsage(modelAlias, tokens)
+			if err != nil {
+				c.logger.Warn(ctx, "llm budget exceeded after usage", Fields{
+					"model":        modelAlias,
+					"used_tokens":  snapshot.UsedTokens,
+					"limit_tokens": snapshot.Limit,
+				})
+				return nil, err
+			}
+			if snapshot.AlertTriggered {
+				c.logger.Warn(ctx, "llm budget nearing limit", Fields{
+					"model":               modelAlias,
+					"used_tokens":         snapshot.UsedTokens,
+					"limit_tokens":        snapshot.Limit,
+					"usage_pct":           snapshot.UsagePct,
+					"spent_cost_usd":      snapshot.UsedCostUSD,
+					"alert_threshold_pct": snapshot.AlertThresholdPct,
+				})
+			}
+		}
+	}
 
 	return result, nil
 }
@@ -383,9 +423,17 @@ func (c *Client) ChatStream(ctx context.Context, req *ChatRequest) (<-chan Strea
 	if req == nil {
 		return nil, errors.New("llm: request cannot be nil")
 	}
+	if c.budget != nil {
+		if err := c.budget.AllowAttempt(); err != nil {
+			c.logger.Warn(ctx, "llm budget exhausted", Fields{
+				"model": strings.TrimSpace(req.Model),
+			})
+			return nil, err
+		}
+	}
 	streamReq := *req
 	streamReq.Stream = true
-	params, modelID, err := c.buildChatParams(&streamReq)
+	params, _, modelID, err := c.buildChatParams(&streamReq)
 	if err != nil {
 		return nil, err
 	}
@@ -472,9 +520,9 @@ func (c *Client) Close() error {
 	return nil
 }
 
-func (c *Client) buildChatParams(req *ChatRequest) (openai.ChatCompletionNewParams, string, error) {
+func (c *Client) buildChatParams(req *ChatRequest) (openai.ChatCompletionNewParams, string, string, error) {
 	if len(req.Messages) == 0 {
-		return openai.ChatCompletionNewParams{}, "", errors.New("llm: request requires at least one message")
+		return openai.ChatCompletionNewParams{}, "", "", errors.New("llm: request requires at least one message")
 	}
 
 	modelAlias := strings.TrimSpace(req.Model)
@@ -491,7 +539,7 @@ func (c *Client) buildChatParams(req *ChatRequest) (openai.ChatCompletionNewPara
 
 	messageParams, err := buildMessageParams(req.Messages)
 	if err != nil {
-		return openai.ChatCompletionNewParams{}, "", err
+		return openai.ChatCompletionNewParams{}, "", "", err
 	}
 
 	params := openai.ChatCompletionNewParams{
@@ -500,7 +548,7 @@ func (c *Client) buildChatParams(req *ChatRequest) (openai.ChatCompletionNewPara
 	}
 
 	if rf, ok, err := toResponseFormatParam(req.ResponseFormat); err != nil {
-		return openai.ChatCompletionNewParams{}, "", err
+		return openai.ChatCompletionNewParams{}, "", "", err
 	} else if ok {
 		params.ResponseFormat = rf
 	}
@@ -523,7 +571,7 @@ func (c *Client) buildChatParams(req *ChatRequest) (openai.ChatCompletionNewPara
 		params.TopP = openai.Float(*modelCfg.TopP)
 	}
 
-	return params, modelID, nil
+	return params, modelAlias, modelID, nil
 }
 
 func buildMessageParams(msgs []Message) ([]openai.ChatCompletionMessageParamUnion, error) {

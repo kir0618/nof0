@@ -10,6 +10,9 @@ import (
 
 func TestLoadConfig(t *testing.T) {
 	dir := t.TempDir()
+	schemaPath := filepath.Join(dir, "decision_schema.json")
+	assert.NoError(t, os.WriteFile(schemaPath, []byte(`{"type":"object"}`), 0o600))
+
 	configYAML := `
 major_coin_leverage: 20
 altcoin_leverage: 10
@@ -26,6 +29,10 @@ signing_key: ${EXEC_SIGNING_KEY}
 overrides:
   trader_alpha:
     min_confidence: 80
+output_validation:
+  enabled: true
+  schema_path: decision_schema.json
+  fail_on_invalid: true
 `
 	path := filepath.Join(dir, "executor.yaml")
 	err := os.WriteFile(path, []byte(configYAML), 0o600)
@@ -46,6 +53,9 @@ overrides:
 
 	expectedIDs := []string{"trader_alpha", "trader_beta"}
 	assert.Equal(t, expectedIDs, cfg.AllowedTraderIDs, "AllowedTraderIDs should match expected list")
+	assert.True(t, cfg.OutputValidation.Enabled)
+	assert.True(t, cfg.OutputValidation.FailOnInvalid)
+	assert.Equal(t, schemaPath, cfg.OutputValidation.SchemaPath)
 }
 
 func TestLoadConfigInvalidMinRiskReward(t *testing.T) {

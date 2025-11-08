@@ -319,15 +319,23 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("manager config: traders[%d].exec_guards.max_margin_usage_pct must be 0..100", i)
 		}
 	}
-	if totalAllocation > 100+1e-6 {
-		return fmt.Errorf("manager config: trader allocation sum %.2f exceeds 100", totalAllocation)
-	}
-	if totalAllocation > 100-c.Manager.ReserveEquityPct+1e-6 {
-		return fmt.Errorf("manager config: trader allocation %.2f exceeds available equity after reserve %.2f", totalAllocation, c.Manager.ReserveEquityPct)
+	if err := c.validateAllocationBudget(totalAllocation); err != nil {
+		return err
 	}
 
 	if c.Monitoring.MetricsExporter == "" {
 		return errors.New("manager config: monitoring.metrics_exporter is required")
+	}
+	return nil
+}
+
+func (c *Config) validateAllocationBudget(totalAllocation float64) error {
+	if totalAllocation > 100+1e-6 {
+		return fmt.Errorf("manager config: trader allocation sum %.2f exceeds 100", totalAllocation)
+	}
+	maxAllowed := 100 - c.Manager.ReserveEquityPct
+	if totalAllocation > maxAllowed+1e-6 {
+		return fmt.Errorf("manager config: trader allocation %.2f exceeds available equity after reserve %.2f", totalAllocation, maxAllowed)
 	}
 	return nil
 }

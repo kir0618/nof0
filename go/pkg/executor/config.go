@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,17 +29,26 @@ type Config struct {
 	Overrides              map[string]Override `yaml:"overrides"`
 	PromptSchemaVersion    string              `yaml:"prompt_schema_version"`
 	PromptValidation       PromptValidation    `yaml:"prompt_validation"`
+	OutputValidation       OutputValidation    `yaml:"output_validation"`
 	TraderID               string              `yaml:"-"` // runtime-only metadata for persistence hooks
 
 	DecisionIntervalRaw string `yaml:"decision_interval"`
 	DecisionTimeoutRaw  string `yaml:"decision_timeout"`
 	minRiskRewardSet    bool
+	baseDir             string
 }
 
 // PromptValidation encapsulates prompt schema validation toggles.
 type PromptValidation struct {
 	StrictMode           bool `yaml:"strict_mode"`
 	RequireVersionHeader bool `yaml:"require_version_header"`
+}
+
+// OutputValidation controls JSON schema enforcement on LLM responses.
+type OutputValidation struct {
+	Enabled       bool   `yaml:"enabled"`
+	SchemaPath    string `yaml:"schema_path"`
+	FailOnInvalid bool   `yaml:"fail_on_invalid"`
 }
 
 // Override allows per-trader or per-symbol overrides of core thresholds.
@@ -58,7 +68,7 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("open executor config: %w", err)
 	}
 	defer file.Close()
-	return LoadConfigFromReader(file)
+	return loadConfigFromReader(file, filepath.Dir(path))
 }
 
 // MustLoad reads executor configuration from the default project location and panics on error.
@@ -73,6 +83,10 @@ func MustLoad() *Config {
 
 // LoadConfigFromReader constructs a Config from a reader.
 func LoadConfigFromReader(r io.Reader) (*Config, error) {
+	return loadConfigFromReader(r, "")
+}
+
+func loadConfigFromReader(r io.Reader, baseDir string) (*Config, error) {
 	confkit.LoadDotenvOnce()
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -83,6 +97,7 @@ func LoadConfigFromReader(r io.Reader) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal executor config: %w", err)
 	}
+	cfg.baseDir = baseDir
 	var raw map[string]any
 	if err := yaml.Unmarshal(data, &raw); err == nil {
 		if _, ok := raw["min_risk_reward"]; ok {
@@ -141,6 +156,7 @@ func (c *Config) expandFields() {
 	if c.PromptSchemaVersion != "" {
 		c.PromptSchemaVersion = strings.TrimSpace(c.PromptSchemaVersion)
 	}
+	c.OutputValidation.SchemaPath = c.resolvePath(c.OutputValidation.SchemaPath)
 	for i, id := range c.AllowedTraderIDs {
 		c.AllowedTraderIDs[i] = strings.TrimSpace(id)
 	}
@@ -165,6 +181,15 @@ func (c *Config) Validate() error {
 	}
 	if c.PromptValidation.RequireVersionHeader && strings.TrimSpace(c.PromptSchemaVersion) == "" {
 		return errors.New("executor config: prompt_schema_version is required when prompt_validation.require_version_header is true")
+	}
+	if c.OutputValidation.Enabled {
+		path := strings.TrimSpace(c.OutputValidation.SchemaPath)
+		if path == "" {
+			return errors.New("executor config: output_validation.schema_path is required when enabled")
+		}
+		if _, err := os.Stat(path); err != nil {
+			return fmt.Errorf("executor config: output_validation.schema_path %q not accessible: %w", path, err)
+		}
 	}
 	if len(c.AllowedTraderIDs) > 0 {
 		seen := make(map[string]struct{}, len(c.AllowedTraderIDs))
@@ -201,4 +226,21 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func (c *Config) resolvePath(path string) string {
+	path = strings.TrimSpace(os.ExpandEnv(path))
+	if path == "" || filepath.IsAbs(path) {
+		return path
+	}
+	if c.baseDir != "" {
+		candidate := filepath.Join(c.baseDir, path)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	if projectPath, err := confkit.ProjectPath(path); err == nil {
+		return projectPath
+	}
+	return path
 }

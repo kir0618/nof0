@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -227,6 +228,78 @@ func TestClientChatStructured(t *testing.T) {
 	responseFormat, ok := captured["response_format"].(map[string]any)
 	require.True(t, ok)
 	require.Contains(t, responseFormat, "json_schema")
+}
+
+func TestClientChatBudget(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		callCount int
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		callCount++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"chatcmpl-budget",
+			"object":"chat.completion",
+			"created":1730366400,
+			"model":"openai/gpt-5",
+			"choices":[{"index":0,"finish_reason":"stop","logprobs":null,"message":{"role":"assistant","content":"Hello","tool_calls":[]}}],
+			"usage":{"prompt_tokens":10,"completion_tokens":12,"total_tokens":22}
+		}`))
+	}))
+	defer server.Close()
+
+	cfg := &Config{
+		BaseURL:      server.URL,
+		APIKey:       "test-key",
+		DefaultModel: "gpt-5",
+		Timeout:      5 * time.Second,
+		MaxRetries:   0,
+		LogLevel:     "error",
+		Models: map[string]ModelConfig{
+			"gpt-5": {Provider: "openai", ModelName: "openai/gpt-5"},
+		},
+		Budget: &BudgetConfig{
+			DailyTokenLimit:   30,
+			AlertThresholdPct: 50,
+			StrictEnforcement: true,
+		},
+	}
+
+	client, err := NewClient(cfg, WithHTTPClient(server.Client()))
+	require.NoError(t, err)
+	defer client.Close()
+
+	req := &ChatRequest{
+		Model: "gpt-5",
+		Messages: []Message{
+			{Role: "user", Content: "hi"},
+		},
+	}
+
+	ctx := context.Background()
+	_, err = client.Chat(ctx, req)
+	require.NoError(t, err)
+
+	_, err = client.Chat(ctx, req)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrBudgetExceeded))
+
+	mu.Lock()
+	recordedCalls := callCount
+	mu.Unlock()
+	require.Equal(t, 2, recordedCalls)
+
+	_, err = client.Chat(ctx, req)
+	require.ErrorIs(t, err, ErrBudgetExceeded)
+
+	mu.Lock()
+	recordedCalls = callCount
+	mu.Unlock()
+	require.Equal(t, 2, recordedCalls, "third call should be blocked before HTTP request")
 }
 
 func TestClientOptions(t *testing.T) {

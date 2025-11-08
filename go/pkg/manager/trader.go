@@ -56,6 +56,20 @@ type PerformanceMetrics struct {
 	UpdatedAt          time.Time
 }
 
+// VirtualPosition mirrors the notional exposure a trader believes it owns on the
+// shared exchange account. This is reconciled against physical positions to
+// guarantee isolation across virtual traders.
+type VirtualPosition struct {
+	Symbol      string
+	Side        string
+	Quantity    float64
+	NotionalUSD float64
+	EntryPrice  float64
+	Leverage    int
+	OpenedAt    time.Time
+	UpdatedAt   time.Time
+}
+
 // ToExecutorView converts to the compact view used by the executor prompts.
 func (p *PerformanceMetrics) ToExecutorView() *executorpkg.PerformanceView {
 	if p == nil {
@@ -92,6 +106,7 @@ type VirtualTrader struct {
 	DecisionInterval     time.Duration
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
+	VirtualPositions     map[string]VirtualPosition
 	// Cooldown map tracks last successful close time per symbol
 	Cooldown map[string]time.Time
 	// Decision journal writer (per trader)

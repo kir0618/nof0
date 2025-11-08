@@ -36,6 +36,7 @@ type Config struct {
 	MaxRetries   int                    `yaml:"max_retries"`
 	LogLevel     string                 `yaml:"log_level"`
 	Models       map[string]ModelConfig `yaml:"models"`
+	Budget       *BudgetConfig          `yaml:"budget"`
 	// Optional defaults for Zenmux auto-routing
 	RoutingDefaults *RoutingConfig `yaml:"routing_defaults,omitempty"`
 
@@ -49,6 +50,58 @@ type ModelConfig struct {
 	Temperature         *float64 `yaml:"temperature,omitempty"`
 	MaxCompletionTokens *int     `yaml:"max_completion_tokens,omitempty"`
 	TopP                *float64 `yaml:"top_p,omitempty"`
+	Priority            int      `yaml:"priority,omitempty"`
+	CostTier            string   `yaml:"cost_tier,omitempty"`
+}
+
+// BudgetConfig controls token spend for LLM usage.
+type BudgetConfig struct {
+	DailyTokenLimit      int64              `yaml:"daily_token_limit"`
+	AlertThresholdPct    int                `yaml:"alert_threshold_pct"`
+	StrictEnforcement    bool               `yaml:"strict_enforcement"`
+	CostPerMillionTokens map[string]float64 `yaml:"cost_per_million_tokens"`
+}
+
+func (b *BudgetConfig) Clone() *BudgetConfig {
+	if b == nil {
+		return nil
+	}
+	cp := *b
+	if b.CostPerMillionTokens != nil {
+		cp.CostPerMillionTokens = make(map[string]float64, len(b.CostPerMillionTokens))
+		for k, v := range b.CostPerMillionTokens {
+			cp.CostPerMillionTokens[k] = v
+		}
+	}
+	return &cp
+}
+
+func (b *BudgetConfig) applyDefaults() {
+	if b == nil {
+		return
+	}
+	if b.AlertThresholdPct <= 0 {
+		b.AlertThresholdPct = 80
+	}
+}
+
+// Validate ensures budget configuration is sane.
+func (b *BudgetConfig) Validate() error {
+	if b == nil {
+		return nil
+	}
+	if b.DailyTokenLimit <= 0 {
+		return errors.New("llm config: budget.daily_token_limit must be positive")
+	}
+	if b.AlertThresholdPct < 0 || b.AlertThresholdPct > 100 {
+		return errors.New("llm config: budget.alert_threshold_pct must be between 0 and 100")
+	}
+	for name, cost := range b.CostPerMillionTokens {
+		if cost < 0 {
+			return fmt.Errorf("llm config: budget cost_per_million_tokens[%s] cannot be negative", name)
+		}
+	}
+	return nil
 }
 
 // LoadConfig reads configuration from disk.
@@ -83,6 +136,7 @@ func LoadConfigFromReader(r io.Reader) (*Config, error) {
 		MaxRetries      int                    `yaml:"max_retries"`
 		LogLevel        string                 `yaml:"log_level"`
 		Models          map[string]ModelConfig `yaml:"models"`
+		Budget          *BudgetConfig          `yaml:"budget"`
 		RoutingDefaults *RoutingConfig         `yaml:"routing_defaults"`
 	}
 
@@ -101,6 +155,7 @@ func LoadConfigFromReader(r io.Reader) (*Config, error) {
 		MaxRetries:      raw.MaxRetries,
 		LogLevel:        raw.LogLevel,
 		Models:          raw.Models,
+		Budget:          raw.Budget,
 		RoutingDefaults: raw.RoutingDefaults,
 		timeoutRaw:      raw.Timeout,
 	}
@@ -133,6 +188,11 @@ func (c *Config) Validate() error {
 	if c.MaxRetries < 0 {
 		return errors.New("llm config: max_retries cannot be negative")
 	}
+	if c.Budget != nil {
+		if err := c.Budget.Validate(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -158,6 +218,9 @@ func (c *Config) Clone() *Config {
 			cp.Models[k] = v
 		}
 	}
+	if c.Budget != nil {
+		cp.Budget = c.Budget.Clone()
+	}
 	return &cp
 }
 
@@ -170,6 +233,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.MaxRetries <= 0 {
 		c.MaxRetries = defaultMaxRetries
+	}
+	if c.Budget != nil {
+		c.Budget.applyDefaults()
 	}
 }
 

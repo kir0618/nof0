@@ -25,6 +25,12 @@ models:
     provider: "openai"
     model_name: "gpt-4-turbo"
     temperature: 0.7
+budget:
+  daily_token_limit: 10000
+  alert_threshold_pct: 75
+  strict_enforcement: true
+  cost_per_million_tokens:
+    gpt-4: 30.5
 `
 		tmpDir := t.TempDir()
 		configPath := filepath.Join(tmpDir, "config.yaml")
@@ -39,6 +45,11 @@ models:
 		require.Equal(t, 30*time.Second, cfg.Timeout)
 		require.Equal(t, 3, cfg.MaxRetries)
 		require.Equal(t, "info", cfg.LogLevel)
+		require.NotNil(t, cfg.Budget)
+		require.EqualValues(t, 10000, cfg.Budget.DailyTokenLimit)
+		require.Equal(t, 75, cfg.Budget.AlertThresholdPct)
+		require.True(t, cfg.Budget.StrictEnforcement)
+		require.Equal(t, 30.5, cfg.Budget.CostPerMillionTokens["gpt-4"])
 	})
 
 	t.Run("file not found", func(t *testing.T) {
@@ -247,6 +258,30 @@ func TestConfigParseTimeout(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBudgetConfigValidate(t *testing.T) {
+	valid := &BudgetConfig{
+		DailyTokenLimit:   1000,
+		AlertThresholdPct: 50,
+		CostPerMillionTokens: map[string]float64{
+			"gpt-4": 25.5,
+		},
+	}
+	require.NoError(t, valid.Validate())
+
+	invalidLimit := &BudgetConfig{}
+	require.Error(t, invalidLimit.Validate())
+
+	invalidThreshold := &BudgetConfig{DailyTokenLimit: 100, AlertThresholdPct: 150}
+	require.Error(t, invalidThreshold.Validate())
+
+	invalidCost := &BudgetConfig{DailyTokenLimit: 100, AlertThresholdPct: 50, CostPerMillionTokens: map[string]float64{"gpt-4": -1}}
+	require.Error(t, invalidCost.Validate())
+
+	cfg := &BudgetConfig{DailyTokenLimit: 100, AlertThresholdPct: 0}
+	cfg.applyDefaults()
+	require.Equal(t, 80, cfg.AlertThresholdPct)
 }
 
 func TestConfigModel(t *testing.T) {

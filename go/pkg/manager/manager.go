@@ -23,6 +23,10 @@ import (
 	"nof0-api/pkg/market"
 )
 
+const (
+	positionQuantityTolerance = 1e-6
+)
+
 // ExecutorFactory abstracts executor construction so Manager stays decoupled
 // from concrete executor wiring (local vs RPC, prompt template selection, etc.).
 type ExecutorFactory interface {
@@ -96,6 +100,8 @@ type Manager struct {
 	config *Config
 
 	traders map[string]*VirtualTrader // Trader ID → instance
+	// symbol (uppercased) → trader ID
+	positionOwners map[string]string
 
 	// Provider registries resolved at startup (see internal/svc for wiring).
 	exchangeProviders map[string]exchange.Provider
@@ -126,6 +132,7 @@ func NewManager(
 	m := &Manager{
 		config:            cfg,
 		traders:           make(map[string]*VirtualTrader),
+		positionOwners:    make(map[string]string),
 		exchangeProviders: make(map[string]exchange.Provider),
 		marketProviders:   make(map[string]market.Provider),
 		executorFactory:   execFactory,
@@ -215,6 +222,7 @@ func (m *Manager) RegisterTrader(cfg TraderConfig) (*VirtualTrader, error) {
 		DecisionInterval: cfg.DecisionInterval,
 		CreatedAt:        time.Now(),
 		UpdatedAt:        time.Now(),
+		VirtualPositions: make(map[string]VirtualPosition),
 		Cooldown:         make(map[string]time.Time),
 		JournalEnabled:   cfg.JournalEnabled,
 	}
@@ -238,13 +246,15 @@ func (m *Manager) RegisterTrader(cfg TraderConfig) (*VirtualTrader, error) {
 // UnregisterTrader stops and removes a trader from registry.
 func (m *Manager) UnregisterTrader(traderID string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	t, ok := m.traders[traderID]
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("manager: trader %s not found", traderID)
 	}
-	_ = t.Stop() // Best-effort stop; ignore error for MVP.
 	delete(m.traders, traderID)
+	m.mu.Unlock()
+	_ = t.Stop() // Best-effort stop; ignore error for MVP.
+	m.releaseAllVirtualPositions(t)
 	logx.Infof("manager: unregistered trader id=%s", traderID)
 	return nil
 }
@@ -427,8 +437,27 @@ func (m *Manager) ExecuteDecision(trader *VirtualTrader, decision *executorpkg.D
 		return errors.New("manager: decision position size must be non-negative")
 	}
 
+	isOpen := decision.Action == "open_long" || decision.Action == "open_short"
+	isClose := decision.Action == "close_long" || decision.Action == "close_short"
+	if (isOpen || isClose) && decision.Symbol == "" {
+		return errors.New("manager: symbol required for trade action")
+	}
+	if isOpen {
+		if err := m.ensureSymbolAvailable(trader, decision.Symbol); err != nil {
+			return err
+		}
+		if err := m.SyncTraderPositions(trader.ID); err != nil {
+			logx.Errorf("manager: sync trader %s before execution failed: %v", trader.ID, err)
+		}
+	}
+	if isClose {
+		if err := m.ensureCloseOwnership(trader, decision.Symbol); err != nil {
+			return err
+		}
+	}
+
 	// Close actions shortcut via provider.
-	if decision.Action == "close_long" || decision.Action == "close_short" {
+	if isClose {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		var closeSnapPrice float64
@@ -475,17 +504,13 @@ func (m *Manager) ExecuteDecision(trader *VirtualTrader, decision *executorpkg.D
 			FillSize:         fillQty,
 			OccurredAt:       time.Now(),
 		})
+		m.releaseVirtualPosition(trader.ID, decision.Symbol)
 		return nil
 	}
 
 	if decision.Action != "open_long" && decision.Action != "open_short" {
 		// Ignore non-trade actions (e.g., hold/wait).
 		return nil
-	}
-
-	// Enforce per-trader caps.
-	if trader.RiskParams.MaxPositionSizeUSD > 0 && decision.PositionSizeUSD > trader.RiskParams.MaxPositionSizeUSD+1e-6 {
-		return fmt.Errorf("manager: decision size %.2f exceeds max_position_size_usd %.2f", decision.PositionSizeUSD, trader.RiskParams.MaxPositionSizeUSD)
 	}
 
 	// Resolve leverage preference.
@@ -496,6 +521,10 @@ func (m *Manager) ExecuteDecision(trader *VirtualTrader, decision *executorpkg.D
 		} else {
 			lev = trader.RiskParams.AltcoinLeverage
 		}
+	}
+	decision.Leverage = lev
+	if err := m.enforceSecondaryRisk(trader, decision, lev); err != nil {
+		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -615,16 +644,49 @@ func (m *Manager) ExecuteDecision(trader *VirtualTrader, decision *executorpkg.D
 		_ = p.SetStopLoss(ctx, decision.Symbol, side, qty, decision.StopLoss)
 		_ = p.SetTakeProfit(ctx, decision.Symbol, side, qty, decision.TakeProfit)
 	}
+	fillPrice := price
+	fillQty := qty
+	if fp, fq, ok := parseOrderFill(orderResp); ok {
+		if fq > 0 {
+			fillQty = fq
+		}
+		if fp > 0 {
+			fillPrice = fp
+		}
+	}
+	if fillQty <= 0 {
+		fillQty = qty
+	}
+	if fillPrice <= 0 {
+		fillPrice = price
+	}
 	m.recordPositionEvent(PositionEvent{
 		TraderID:         trader.ID,
 		Trader:           trader,
 		Decision:         *decision,
 		Event:            PositionEventOpen,
 		ExchangeResponse: orderResp,
-		FillPrice:        price,
-		FillSize:         qty,
+		FillPrice:        fillPrice,
+		FillSize:         fillQty,
 		OccurredAt:       time.Now(),
 	})
+	virtualSide := "long"
+	if !isBuy {
+		virtualSide = "short"
+	}
+	if fillQty > 0 {
+		vp := VirtualPosition{
+			Symbol:      decision.Symbol,
+			Side:        virtualSide,
+			Quantity:    fillQty,
+			EntryPrice:  fillPrice,
+			NotionalUSD: fillQty * fillPrice,
+			Leverage:    lev,
+		}
+		if err := m.assignVirtualPosition(trader, vp); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -692,7 +754,7 @@ func (m *Manager) SyncTraderPositions(traderID string) error {
 			UpdatedAt:      t.Performance.UpdatedAt,
 		})
 	}
-	return nil
+	return m.ReconcileTraderPositions(ctx, traderID)
 }
 
 func parseFloat(s string) float64 {
@@ -729,6 +791,162 @@ func isBTCorETH(symbol string) bool {
 	default:
 		return false
 	}
+}
+
+func normalizeSymbol(symbol string) string {
+	return strings.ToUpper(strings.TrimSpace(symbol))
+}
+
+func (m *Manager) ensureSymbolAvailable(trader *VirtualTrader, symbol string) error {
+	if trader == nil {
+		return errors.New("manager: trader is nil")
+	}
+	key := normalizeSymbol(symbol)
+	if key == "" {
+		return errors.New("manager: symbol is required for open action")
+	}
+	owner := m.getPositionOwner(key)
+	if owner == "" {
+		return nil
+	}
+	if owner == trader.ID {
+		return fmt.Errorf("manager: trader %s already controls %s", trader.ID, symbol)
+	}
+	return fmt.Errorf("manager: symbol %s currently assigned to trader %s", symbol, owner)
+}
+
+func (m *Manager) ensureCloseOwnership(trader *VirtualTrader, symbol string) error {
+	if trader == nil {
+		return errors.New("manager: trader is nil")
+	}
+	key := normalizeSymbol(symbol)
+	if key == "" {
+		return errors.New("manager: symbol is required for close action")
+	}
+	owner := m.getPositionOwner(key)
+	if owner == "" {
+		logx.Slowf("manager: trader %s closing unassigned symbol %s", trader.ID, symbol)
+		return nil
+	}
+	if owner != trader.ID {
+		return fmt.Errorf("manager: trader %s cannot close %s owned by trader %s", trader.ID, symbol, owner)
+	}
+	return nil
+}
+
+func (m *Manager) getPositionOwner(symbol string) string {
+	if m == nil {
+		return ""
+	}
+	key := normalizeSymbol(symbol)
+	if key == "" {
+		return ""
+	}
+	m.mu.RLock()
+	owner := m.positionOwners[key]
+	m.mu.RUnlock()
+	return owner
+}
+
+func (m *Manager) assignVirtualPosition(trader *VirtualTrader, pos VirtualPosition) error {
+	if m == nil || trader == nil {
+		return errors.New("manager: assign virtual position missing trader")
+	}
+	key := normalizeSymbol(pos.Symbol)
+	if key == "" {
+		return errors.New("manager: assign virtual position requires symbol")
+	}
+	now := time.Now()
+	if pos.OpenedAt.IsZero() {
+		pos.OpenedAt = now
+	}
+	pos.UpdatedAt = now
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if owner, ok := m.positionOwners[key]; ok && owner != trader.ID {
+		return fmt.Errorf("manager: symbol %s already assigned to trader %s", pos.Symbol, owner)
+	}
+	trader.mu.Lock()
+	if trader.VirtualPositions == nil {
+		trader.VirtualPositions = make(map[string]VirtualPosition)
+	}
+	trader.VirtualPositions[key] = pos
+	trader.mu.Unlock()
+	m.positionOwners[key] = trader.ID
+	return nil
+}
+
+func (m *Manager) releaseVirtualPosition(traderID, symbol string) {
+	if m == nil {
+		return
+	}
+	key := normalizeSymbol(symbol)
+	if key == "" {
+		return
+	}
+	m.mu.Lock()
+	trader := m.traders[traderID]
+	owner := m.positionOwners[key]
+	if owner != "" && owner != traderID {
+		m.mu.Unlock()
+		return
+	}
+	delete(m.positionOwners, key)
+	m.mu.Unlock()
+	if trader == nil {
+		return
+	}
+	trader.mu.Lock()
+	delete(trader.VirtualPositions, key)
+	trader.mu.Unlock()
+}
+
+func (m *Manager) releaseAllVirtualPositions(trader *VirtualTrader) {
+	if trader == nil {
+		return
+	}
+	trader.mu.RLock()
+	symbols := make([]string, 0, len(trader.VirtualPositions))
+	for sym := range trader.VirtualPositions {
+		symbols = append(symbols, sym)
+	}
+	trader.mu.RUnlock()
+	for _, sym := range symbols {
+		m.releaseVirtualPosition(trader.ID, sym)
+	}
+}
+
+func (m *Manager) snapshotVirtualPositions(trader *VirtualTrader) map[string]VirtualPosition {
+	if trader == nil {
+		return nil
+	}
+	trader.mu.RLock()
+	defer trader.mu.RUnlock()
+	out := make(map[string]VirtualPosition, len(trader.VirtualPositions))
+	for k, v := range trader.VirtualPositions {
+		out[k] = v
+	}
+	return out
+}
+
+func (m *Manager) filterPositionsForTrader(traderID string, positions []exchange.Position) []exchange.Position {
+	if m == nil {
+		return positions
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if len(m.positionOwners) == 0 {
+		return positions
+	}
+	filtered := make([]exchange.Position, 0, len(positions))
+	for _, p := range positions {
+		key := normalizeSymbol(p.Coin)
+		owner := m.positionOwners[key]
+		if owner == "" || owner == traderID {
+			filtered = append(filtered, p)
+		}
+	}
+	return filtered
 }
 
 func summarizeOrderResponse(resp *exchange.OrderResponse) string {
@@ -779,6 +997,131 @@ func parseOrderFill(resp *exchange.OrderResponse) (price float64, qty float64, o
 		}
 	}
 	return 0, 0, false
+}
+
+// ReconcileTraderPositions ensures the manager's virtual book matches the actual
+// exchange positions for a trader. It also auto-assigns unowned positions to the
+// trader that detects them, emitting warnings for manual review.
+func (m *Manager) ReconcileTraderPositions(ctx context.Context, traderID string) error {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	trader := m.traders[traderID]
+	m.mu.RUnlock()
+	if trader == nil {
+		return fmt.Errorf("manager: reconcile trader %s not found", traderID)
+	}
+	var cancel context.CancelFunc
+	if ctx == nil {
+		ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+	}
+	positionsRaw, err := trader.ExchangeProvider.GetPositions(ctx)
+	if err != nil {
+		return fmt.Errorf("manager: fetch positions for trader %s: %w", traderID, err)
+	}
+	actual := make(map[string]exchange.Position, len(positionsRaw))
+	for _, p := range positionsRaw {
+		if qty := parseFloat(p.Szi); qty != 0 {
+			actual[normalizeSymbol(p.Coin)] = p
+		}
+	}
+	virtual := m.snapshotVirtualPositions(trader)
+	for sym, v := range virtual {
+		p, ok := actual[sym]
+		if !ok {
+			logx.Slowf("manager: trader %s virtual position %s missing on exchange; releasing", trader.ID, sym)
+			m.releaseVirtualPosition(trader.ID, sym)
+			continue
+		}
+		vp, _ := exchangePositionToVirtual(p)
+		if vp.Symbol == "" {
+			continue
+		}
+		if v.Side != vp.Side || math.Abs(v.Quantity-vp.Quantity) > positionQuantityTolerance {
+			return fmt.Errorf("manager: position mismatch %s (virtual %.6f %s vs exchange %.6f %s)", sym, v.Quantity, v.Side, vp.Quantity, vp.Side)
+		}
+	}
+	for sym, p := range actual {
+		owner := m.getPositionOwner(sym)
+		vp, ok := exchangePositionToVirtual(p)
+		if !ok {
+			continue
+		}
+		if owner != "" && owner != trader.ID {
+			// Another trader owns this symbol; they will reconcile it during their sync.
+			continue
+		}
+		if owner == "" {
+			logx.Slowf("manager: assigning unowned position %s to trader %s during reconciliation", sym, trader.ID)
+			if err := m.assignVirtualPosition(trader, vp); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, ok := virtual[sym]; !ok {
+			if err := m.assignVirtualPosition(trader, vp); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func exchangePositionToVirtual(p exchange.Position) (VirtualPosition, bool) {
+	qtySigned := parseFloat(p.Szi)
+	if qtySigned == 0 {
+		return VirtualPosition{}, false
+	}
+	side := "long"
+	if qtySigned < 0 {
+		side = "short"
+	}
+	qty := math.Abs(qtySigned)
+	entry := parsePtrFloat(p.EntryPx)
+	if entry <= 0 && qty > 0 {
+		if pv := parseFloat(p.PositionValue); pv > 0 {
+			entry = pv / qty
+		}
+	}
+	vp := VirtualPosition{
+		Symbol:     p.Coin,
+		Side:       side,
+		Quantity:   qty,
+		EntryPrice: entry,
+		Leverage:   p.Leverage.Value,
+	}
+	if entry > 0 {
+		vp.NotionalUSD = entry * qty
+	} else {
+		vp.NotionalUSD = parseFloat(p.PositionValue)
+	}
+	return vp, true
+}
+
+func (m *Manager) enforceSecondaryRisk(trader *VirtualTrader, decision *executorpkg.Decision, leverage int) error {
+	if trader == nil || decision == nil {
+		return errors.New("manager: missing inputs for risk check")
+	}
+	rp := trader.RiskParams
+	if rp.MaxPositionSizeUSD > 0 && decision.PositionSizeUSD > rp.MaxPositionSizeUSD+1e-6 {
+		return fmt.Errorf("manager: decision size %.2f exceeds max_position_size_usd %.2f", decision.PositionSizeUSD, rp.MaxPositionSizeUSD)
+	}
+	if rp.MaxMarginUsagePct > 0 && leverage > 0 {
+		trader.mu.RLock()
+		alloc := trader.ResourceAlloc
+		trader.mu.RUnlock()
+		equity := alloc.CurrentEquityUSD
+		if equity > 0 {
+			projected := alloc.MarginUsedUSD + decision.PositionSizeUSD/float64(leverage)
+			usagePct := 100 * (projected / equity)
+			if usagePct > rp.MaxMarginUsagePct+1e-6 {
+				return fmt.Errorf("manager: projected margin usage %.2f%% exceeds cap %.2f%%", usagePct, rp.MaxMarginUsagePct)
+			}
+		}
+	}
+	return nil
 }
 
 func (m *Manager) recordPositionEvent(event PositionEvent) {
@@ -955,6 +1298,7 @@ func (m *Manager) buildExecutorContext(t *VirtualTrader) executorpkg.Context {
 	// 1) Account and positions
 	acctState, _ := t.ExchangeProvider.GetAccountState(ctx)
 	positionsRaw, _ := t.ExchangeProvider.GetPositions(ctx)
+	positionsRaw = m.filterPositionsForTrader(t.ID, positionsRaw)
 
 	// Normalize account info
 	account := executorpkg.AccountInfo{}
