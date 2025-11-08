@@ -13,8 +13,8 @@ import (
 	"github.com/lib/pq"
 	"github.com/zeromicro/go-zero/core/logx"
 	gocache "github.com/zeromicro/go-zero/core/stores/cache"
+	"github.com/zeromicro/go-zero/core/stores/redis"
 	"github.com/zeromicro/go-zero/core/stores/sqlx"
-	"golang.org/x/sync/errgroup"
 
 	cachekeys "nof0-api/internal/cache"
 	"nof0-api/internal/model"
@@ -35,6 +35,7 @@ type Service struct {
 	priceLatestModel model.PriceLatestModel
 	priceTicksModel  model.PriceTicksModel
 	cache            gocache.Cache
+	redis            *redis.Redis
 	ttl              cachekeys.TTLSet
 }
 
@@ -46,6 +47,7 @@ type Config struct {
 	PriceLatestModel model.PriceLatestModel
 	PriceTicksModel  model.PriceTicksModel
 	Cache            gocache.Cache
+	Redis            *redis.Redis
 	TTL              cachekeys.TTLSet
 }
 
@@ -61,6 +63,7 @@ func NewService(cfg Config) market.Persistence {
 		priceLatestModel: cfg.PriceLatestModel,
 		priceTicksModel:  cfg.PriceTicksModel,
 		cache:            cfg.Cache,
+		redis:            cfg.Redis,
 		ttl:              cfg.TTL,
 	}
 }
@@ -250,49 +253,61 @@ func (s *Service) RecordPriceSeries(ctx context.Context, provider string, symbol
 }
 
 func (s *Service) cacheAssets(ctx context.Context, provider string, assets []market.Asset) error {
-	if s.cache == nil || len(assets) == 0 {
+	if s.redis == nil || len(assets) == 0 {
 		return nil
 	}
-	g, gctx := errgroup.WithContext(ctx)
-	if cacheWorkerLimit > 0 {
-		g.SetLimit(cacheWorkerLimit)
-	}
-	for _, asset := range assets {
-		asset := asset
-		g.Go(func() error {
-			if err := s.cacheAsset(gctx, provider, asset); err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return err
-				}
-			}
-			return nil
-		})
-	}
-	return g.Wait()
-}
 
-func (s *Service) cacheAsset(ctx context.Context, provider string, asset market.Asset) error {
-	if s.cache == nil {
-		return nil
-	}
-	key := cachekeys.MarketAssetKey(provider, asset.Symbol)
+	key := cachekeys.MarketAssetKey(provider)
 	ttl := s.ttl.Duration(cachekeys.TTLLong)
 	if ttl <= 0 {
 		ttl = cachekeys.MarketAssetTTL(s.ttl)
 	}
-	payload := map[string]any{
-		"symbol":     asset.Symbol,
-		"base":       asset.Base,
-		"quote":      asset.Quote,
-		"precision":  asset.Precision,
-		"is_active":  asset.IsActive,
-		"metadata":   asset.RawMetadata,
-		"updated_at": time.Now().UTC().UnixMilli(),
+
+	// Build hash fields map: symbol -> JSON payload
+	fields := make(map[string]string, len(assets))
+	for _, asset := range assets {
+		if strings.TrimSpace(asset.Symbol) == "" {
+			continue
+		}
+
+		// Build asset payload
+		payload := map[string]any{
+			"symbol":     asset.Symbol,
+			"base":       asset.Base,
+			"quote":      asset.Quote,
+			"precision":  asset.Precision,
+			"is_active":  asset.IsActive,
+			"updated_at": time.Now().UTC().UnixMilli(),
+		}
+		if asset.RawMetadata != nil && len(asset.RawMetadata) > 0 {
+			payload["metadata"] = asset.RawMetadata
+		}
+
+		// Convert to JSON
+		data, err := json.Marshal(payload)
+		if err != nil {
+			logx.WithContext(ctx).Errorf("marketpersist: marshal asset failed symbol=%s err=%v", asset.Symbol, err)
+			continue
+		}
+		fields[asset.Symbol] = string(data)
 	}
-	if err := s.cache.SetWithExpireCtx(ctx, key, payload, ttl); err != nil {
-		logx.WithContext(ctx).Errorf("marketpersist: cache asset key=%s err=%v", key, err)
+
+	if len(fields) == 0 {
+		return nil
+	}
+
+	// Use HMSET to set all fields at once
+	if err := s.redis.HmsetCtx(ctx, key, fields); err != nil {
+		logx.WithContext(ctx).Errorf("marketpersist: cache assets hash key=%s count=%d err=%v", key, len(fields), err)
 		return err
 	}
+
+	// Set TTL on the hash key
+	if err := s.redis.ExpireCtx(ctx, key, int(ttl.Seconds())); err != nil {
+		logx.WithContext(ctx).Errorf("marketpersist: set ttl on assets hash key=%s err=%v", key, err)
+		return err
+	}
+
 	return nil
 }
 

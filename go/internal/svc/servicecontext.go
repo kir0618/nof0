@@ -7,6 +7,7 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // register pgx driver
+	"github.com/zeromicro/go-zero/core/logx"
 	"github.com/zeromicro/go-zero/core/stores/cache"
 	"github.com/zeromicro/go-zero/core/stores/redis"
 	"github.com/zeromicro/go-zero/core/stores/sqlc"
@@ -50,6 +51,7 @@ type ServiceContext struct {
 	DBConn                      sqlx.SqlConn
 	CachedConn                  *sqlc.CachedConn
 	Cache                       cache.Cache
+	Redis                       *redis.Redis
 	ModelsModel                 model.ModelsModel
 	SymbolsModel                model.SymbolsModel
 	PriceTicksModel             model.PriceTicksModel
@@ -83,6 +85,15 @@ func NewServiceContext(c config.Config, mainConfigPath string) *ServiceContext {
 	}
 	if hasCache {
 		svc.Cache = cache.New(cacheNodes, syncx.NewSingleFlight(), cache.NewStat("nof0-cache"), sql.ErrNoRows, cacheOpts...)
+		// Also create direct Redis client for Hash operations
+		if len(cacheNodes) > 0 {
+			redisConf := cacheNodes[0].RedisConf // keep TLS/user/etc so secure Redis works
+			var err error
+			svc.Redis, err = redis.NewRedis(redisConf)
+			if err != nil {
+				logx.Errorf("failed to create redis client: %v (Hash operations will be disabled)", err)
+			}
+		}
 	}
 	if strings.TrimSpace(c.Postgres.DataSource) != "" {
 		if !hasCache {

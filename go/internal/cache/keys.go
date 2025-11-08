@@ -100,8 +100,10 @@ func CryptoPricesKey() string {
 }
 
 // MarketAssetKey stores static metadata (max leverage, isolation flags).
-func MarketAssetKey(provider, symbol string) string {
-	return formatKey("market", "asset", provider, symbol)
+// Returns hash key in format: nof0:market:asset:{provider}
+// The symbol should be used as the hash field name.
+func MarketAssetKey(provider string) string {
+	return formatKey("market", "asset", provider)
 }
 
 // MarketAssetCtxKey stores volatile market context (funding, OI, etc.).

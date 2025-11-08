@@ -390,6 +390,7 @@ func main() {
 			PriceLatestModel: svcCtx.PriceLatestModel,
 			PriceTicksModel:  svcCtx.PriceTicksModel,
 			Cache:            svcCtx.Cache,
+			Redis:            svcCtx.Redis,
 			TTL:              ttlSet,
 		})
 		if persistService == nil {
