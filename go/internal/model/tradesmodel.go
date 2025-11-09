@@ -2,7 +2,9 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/zeromicro/go-zero/core/stores/cache"
 	"github.com/zeromicro/go-zero/core/stores/sqlx"
@@ -12,40 +14,20 @@ var _ TradesModel = (*customTradesModel)(nil)
 
 // TradeRecord provides a nullable-safe representation of a trade row.
 type TradeRecord struct {
-	ID                     string
-	ModelID                string
-	ExchangeProvider       string
-	Symbol                 string
-	Side                   string
-	TradeType              *string
-	TradeID                *string
-	Quantity               *float64
-	Leverage               *float64
-	Confidence             *float64
-	EntryPrice             *float64
-	EntryTsMs              int64
-	EntryHumanTime         *string
-	EntrySz                *float64
-	EntryTid               *int64
-	EntryOid               *int64
-	EntryCrossed           bool
-	EntryLiquidation       []byte
-	EntryCommissionDollars *float64
-	EntryClosedPnl         *float64
-	ExitPrice              *float64
-	ExitTsMs               *int64
-	ExitHumanTime          *string
-	ExitSz                 *float64
-	ExitTid                *int64
-	ExitOid                *int64
-	ExitCrossed            *bool
-	ExitLiquidation        []byte
-	ExitCommissionDollars  *float64
-	ExitClosedPnl          *float64
-	ExitPlan               []byte
-	RealizedGrossPnl       *float64
-	RealizedNetPnl         *float64
-	TotalCommissionDollars *float64
+	ID               string
+	ModelID          string
+	ExchangeProvider string
+	Symbol           string
+	Side             string
+	Quantity         *float64
+	Leverage         *float64
+	Confidence       *float64
+	EntryPrice       *float64
+	EntryTsMs        int64
+	EntrySz          *float64
+	ExitPrice        *float64
+	ExitTsMs         *int64
+	RealizedNetPnl   *float64
 }
 
 type (
@@ -78,42 +60,14 @@ func (m *customTradesModel) RecentByModel(ctx context.Context, modelID string, l
 	const query = `
 SELECT
     id,
-    model_id,
-    exchange_provider,
+    trader_id,
     symbol,
     side,
-    trade_type,
-    trade_id,
-    quantity,
-    leverage,
-    confidence,
-    entry_price,
-    entry_ts_ms,
-    entry_human_time,
-    entry_sz,
-    entry_tid,
-    entry_oid,
-    entry_crossed,
-    entry_liquidation,
-    entry_commission_dollars,
-    entry_closed_pnl,
-    exit_price,
-    exit_ts_ms,
-    exit_human_time,
-    exit_sz,
-    exit_tid,
-    exit_oid,
-    exit_crossed,
-    exit_liquidation,
-    exit_commission_dollars,
-    exit_closed_pnl,
-    exit_plan,
-    realized_gross_pnl,
-    realized_net_pnl,
-    total_commission_dollars
+    close_ts_ms,
+    detail
 FROM public.trades
-WHERE model_id = $1
-ORDER BY entry_ts_ms DESC
+WHERE trader_id = $1
+ORDER BY close_ts_ms DESC
 LIMIT $2`
 
 	var rows []Trades
@@ -130,118 +84,68 @@ LIMIT $2`
 
 func buildTradeRecord(row *Trades) TradeRecord {
 	rec := TradeRecord{
-		ID:               row.Id,
-		ModelID:          row.ModelId,
-		ExchangeProvider: row.ExchangeProvider,
-		Symbol:           row.Symbol,
-		Side:             row.Side,
-		EntryTsMs:        row.EntryTsMs,
-		EntryCrossed:     row.EntryCrossed,
+		ID:        row.Id,
+		ModelID:   row.TraderId,
+		Symbol:    row.Symbol,
+		Side:      row.Side,
+		EntryTsMs: 0,
 	}
-	if row.TradeType.Valid {
-		value := row.TradeType.String
-		rec.TradeType = &value
-	}
-	if row.TradeId.Valid {
-		value := row.TradeId.String
-		rec.TradeID = &value
-	}
-	if row.Quantity.Valid {
-		value := row.Quantity.Float64
-		rec.Quantity = &value
-	}
-	if row.Leverage.Valid {
-		value := row.Leverage.Float64
-		rec.Leverage = &value
-	}
-	if row.Confidence.Valid {
-		value := row.Confidence.Float64
-		rec.Confidence = &value
-	}
-	if row.EntryPrice.Valid {
-		value := row.EntryPrice.Float64
-		rec.EntryPrice = &value
-	}
-	if row.EntryHumanTime.Valid {
-		value := row.EntryHumanTime.String
-		rec.EntryHumanTime = &value
-	}
-	if row.EntrySz.Valid {
-		value := row.EntrySz.Float64
-		rec.EntrySz = &value
-	}
-	if row.EntryTid.Valid {
-		value := row.EntryTid.Int64
-		rec.EntryTid = &value
-	}
-	if row.EntryOid.Valid {
-		value := row.EntryOid.Int64
-		rec.EntryOid = &value
-	}
-	if row.EntryLiquidation.Valid {
-		rec.EntryLiquidation = []byte(row.EntryLiquidation.String)
-	}
-	if row.EntryCommissionDollars.Valid {
-		value := row.EntryCommissionDollars.Float64
-		rec.EntryCommissionDollars = &value
-	}
-	if row.EntryClosedPnl.Valid {
-		value := row.EntryClosedPnl.Float64
-		rec.EntryClosedPnl = &value
-	}
-	if row.ExitPrice.Valid {
-		value := row.ExitPrice.Float64
-		rec.ExitPrice = &value
-	}
-	if row.ExitTsMs.Valid {
-		value := row.ExitTsMs.Int64
+	if row.CloseTsMs > 0 {
+		value := row.CloseTsMs
 		rec.ExitTsMs = &value
 	}
-	if row.ExitHumanTime.Valid {
-		value := row.ExitHumanTime.String
-		rec.ExitHumanTime = &value
-	}
-	if row.ExitSz.Valid {
-		value := row.ExitSz.Float64
-		rec.ExitSz = &value
-	}
-	if row.ExitTid.Valid {
-		value := row.ExitTid.Int64
-		rec.ExitTid = &value
-	}
-	if row.ExitOid.Valid {
-		value := row.ExitOid.Int64
-		rec.ExitOid = &value
-	}
-	if row.ExitCrossed.Valid {
-		value := row.ExitCrossed.Bool
-		rec.ExitCrossed = &value
-	}
-	if row.ExitLiquidation.Valid {
-		rec.ExitLiquidation = []byte(row.ExitLiquidation.String)
-	}
-	if row.ExitCommissionDollars.Valid {
-		value := row.ExitCommissionDollars.Float64
-		rec.ExitCommissionDollars = &value
-	}
-	if row.ExitClosedPnl.Valid {
-		value := row.ExitClosedPnl.Float64
-		rec.ExitClosedPnl = &value
-	}
-	if row.ExitPlan.Valid {
-		rec.ExitPlan = []byte(row.ExitPlan.String)
-	}
-	if row.RealizedGrossPnl.Valid {
-		value := row.RealizedGrossPnl.Float64
-		rec.RealizedGrossPnl = &value
-	}
-	if row.RealizedNetPnl.Valid {
-		value := row.RealizedNetPnl.Float64
-		rec.RealizedNetPnl = &value
-	}
-	if row.TotalCommissionDollars.Valid {
-		value := row.TotalCommissionDollars.Float64
-		rec.TotalCommissionDollars = &value
-	}
+	detail := decodeTradeDetail(row.Detail)
+	rec.ExchangeProvider = detail.Exchange.Provider
+	rec.EntryTsMs = detail.Time.OpenTsMs
+	rec.EntryPrice = floatPtr(detail.Prices.Entry)
+	rec.ExitPrice = floatPtr(detail.Prices.Exit)
+	rec.Quantity = floatPtr(detail.Quantity.Total)
+	rec.EntrySz = floatPtr(detail.Quantity.Total)
+	rec.Leverage = floatPtr(detail.Risk.Leverage)
+	rec.Confidence = floatPtr(detail.Risk.Confidence)
+	rec.RealizedNetPnl = floatPtr(detail.PnL.Net)
 	return rec
+}
+
+func floatPtr(value float64) *float64 {
+	if value == 0 {
+		return nil
+	}
+	return &value
+}
+
+type tradeDetail struct {
+	Time struct {
+		OpenTsMs        int64 `json:"open_ts_ms"`
+		CloseTsMs       int64 `json:"close_ts_ms"`
+		DurationSeconds int64 `json:"duration_seconds"`
+	} `json:"time"`
+	Prices struct {
+		Entry float64 `json:"entry"`
+		Exit  float64 `json:"exit"`
+	} `json:"prices"`
+	Quantity struct {
+		Total float64 `json:"total"`
+	} `json:"quantity"`
+	Risk struct {
+		Confidence float64 `json:"confidence"`
+		Leverage   float64 `json:"leverage"`
+	} `json:"risk"`
+	Exchange struct {
+		Provider string `json:"provider"`
+	} `json:"exchange"`
+	PnL struct {
+		Net float64 `json:"net"`
+	} `json:"pnl"`
+}
+
+func decodeTradeDetail(raw string) tradeDetail {
+	detail := tradeDetail{}
+	if strings.TrimSpace(raw) == "" {
+		return detail
+	}
+	if err := json.Unmarshal([]byte(raw), &detail); err != nil {
+		return tradeDetail{}
+	}
+	return detail
 }

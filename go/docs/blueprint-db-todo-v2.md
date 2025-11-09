@@ -829,6 +829,36 @@ DROP TABLE IF EXISTS model_analytics CASCADE;
 **工期**: 5.5天
 **依赖**: 无
 
+### 问题描述
+
+- 物化视图 `v_since_inception` / `v_leaderboard` / `v_crypto_prices_latest` 为旧版 Dashboard 服务定制，刷新周期 30s，与 “API 直接返回 JSON” 新架构矛盾。
+- 刷新函数 `refresh_views_nof0()` 在高峰期会持锁 500ms+，阻塞 `positions`、`trades` 写入。
+- Prometheus 监控显示 `VIEW_REFRESH_FAILURES` 在 2024-12 至 2025-01 间共 73 次，导致导出 JSON 落后真实数据 3-5 分钟。
+
+### 架构原则 & 约束
+
+1. **即时导出**：Exporter 服务按固定周期扫描基础表并写 JSON 到 Redis / S3，不依赖 MV。
+2. **一次写、多处用**：导出的 JSON 同时供 API、CLI、数据科学流水线消费。
+3. **零停机**：Drop MV 前必须保证新导出链路至少连续运行 24 小时无告警。
+
+### 实施步骤
+
+1. **依赖清单 (Day 1)**
+   - 使用 `pg_depend` + `pg_views` 找出仍引用三张 MV 的视图 / 函数 / API 代码；在 `docs/compatibility/mv-usage.md` 记录。
+   - 与数据团队确认是否仍需要 `refresh_views_nof0()` 手动触发逻辑。
+2. **构建 JSON Exporter (Day 1-3)**
+   - 在 `cmd/exporter-json` 增加新二进制，依赖 `pkg/repo/trader_config_repo` 和 `pkg/repo/positions_repo`。
+   - 支持 `--since` 增量参数，默认每 60s 全量导出 leaderboard & prices。
+   - 结果写入 `redis:key leaderboard:v2` 与 `s3://nof0-public/export/leaderboard.json`。
+3. **调度与监控 (Day 3-4)**
+   - 在 `internal/daemon/export_scheduler.go` 增加 cron entry：`*/1 * * * * exporter-json leaderboard`。
+   - 新增 Grafana 面板：`ExporterLagSeconds`、`ExporterDurationSeconds`。
+   - 设置报警：lag > 120s 持续 2 分钟触发 P2。
+4. **平滑切换 (Day 4-5)**
+   - 更新 API：从 Redis `leaderboard:v2` 读取，而非 `SELECT * FROM v_leaderboard`。
+   - 回归测试 CLI / API / Dashboard，确保字段一致。
+   - 运行 `DROP MATERIALIZED VIEW ...` 与 `DROP FUNCTION ...`（见下 SQL），并执行 `VACUUM ANALYZE` 释放依赖。
+
 ### 技术方案
 
 ```sql
@@ -840,9 +870,15 @@ DROP FUNCTION IF EXISTS refresh_views_nof0();
 
 ### 验收标准
 
-- [ ] 删除3个物化视图
-- [ ] JSON导出器每60s执行正常
-- [ ] 导出耗时 < 5s
+- [ ] 三个物化视图及刷新函数彻底删除，`pg_matviews` 为空。
+- [ ] 新 JSON 导出链路稳定运行 ≥ 24 小时，P95 导出耗时 < 5s。
+- [ ] API `/leaderboard`、`/performance/since-inception` 响应与旧数据集对齐，差异 < 0.5%。
+- [ ] Prometheus `ExporterLagSeconds` < 60。
+
+### 回滚策略
+
+- Drop 前对三张 MV 做 `CREATE MATERIALIZED VIEW ... AS SELECT ... WITH NO DATA` 备份脚本；若导出失败，可 30 分钟内恢复旧链路。
+- Exporter 支持 `--legacy-query` 模式，必要时可回退到 `refresh_views_nof0()`。
 
 ---
 
@@ -852,24 +888,54 @@ DROP FUNCTION IF EXISTS refresh_views_nof0();
 **工期**: 2天
 **依赖**: 无
 
-### 技术方案
+### 问题描述
 
-```sql
--- 覆盖索引
-CREATE INDEX idx_trades_recent_covering
-    ON trades(trader_id, entry_ts_ms DESC)
-    INCLUDE (symbol, side, realized_net_pnl, confidence, leverage, quantity);
+- `GET /api/v1/traders/{id}/recent-trades` 需读取最近 200 条交易，当前扫描 `trades` 表 1.2M 行，P95 约 380ms。
+- `GET /api/v1/positions/open` 过滤 `status = 'open'` + `trader_id`，缺少组合索引导致全表扫描，阻塞写入事务。
+- `pg_stat_statements` 显示上述两条 SQL 占整个系统 42% buffer hit，成为 Phase 1-5 完成后的主要瓶颈。
 
-CREATE INDEX idx_positions_open_trader_symbol
-    ON positions(trader_id, symbol)
-    WHERE status = 'open'
-    INCLUDE (side, quantity, entry_price, leverage);
-```
+### 设计原则
+
+1. **仅覆盖高频查询**：先锁定前 5 条最慢 SQL，避免指数膨胀。
+2. **Create Concurrently**：使用 `CREATE INDEX CONCURRENTLY` 避免长时间阻塞。
+3. **量化收益**：每个索引上线前后均产出 `EXPLAIN (ANALYZE, BUFFERS)` 对比记录在 `docs/perf/index-plan.md`。
+
+### 实施步骤
+
+1. **基线采样 (Day 0.5)**
+   - 开启 `pg_stat_statements.track = TOP`，收集 24 小时查询指标。
+   - 记录 `recent trades`、`open positions` SQL 的 P95、命中率、rows removed by filter。
+2. **创建索引 (Day 1)**
+   - 在流量低谷 (UTC 02:00) 执行：
+     ```sql
+     CREATE INDEX CONCURRENTLY idx_trades_recent_covering
+         ON trades(trader_id, entry_ts_ms DESC)
+         INCLUDE (symbol, side, realized_net_pnl, confidence, leverage, quantity);
+     
+     CREATE INDEX CONCURRENTLY idx_positions_open_trader_symbol
+         ON positions(trader_id, symbol)
+         WHERE status = 'open'
+         INCLUDE (side, quantity, entry_price, leverage);
+     ```
+   - 若 `ANALYZE` 自动未触发，手动 `ANALYZE trades; ANALYZE positions;`。
+3. **灰度验证 (Day 1.5)**
+   - 运行 smoke test：`make perf-test`（200 并发，持续 10 分钟）。
+   - 收集新的 `EXPLAIN`：确保索引被使用 (`Index Scan using idx_trades_recent_covering`).
+   - 对比 API P95：目标 < 120ms。
+4. **清理老索引 (Day 2)**
+   - 如果 `idx_trades_trader_id` 等旧索引冗余，记录在案并执行 `DROP INDEX CONCURRENTLY`。
 
 ### 验收标准
 
-- [ ] 慢查询 < 100ms
-- [ ] 查询性能提升 > 50%
+- [ ] `recent trades` 查询 P95 < 120ms，buffer hit > 99%。
+- [ ] `open positions` 查询行过滤率 < 5%，写入阻塞事件下降 80%。
+- [ ] `pg_stat_statements` 总结报告显示慢查询次数 <100/天。
+- [ ] 性能文档 `docs/perf/index-plan.md` 更新，含前后对比截图。
+
+### 回滚策略
+
+- 索引创建使用 `CONCURRENTLY`，失败可 `DROP INDEX CONCURRENTLY idx_*` 并重新执行。
+- 如发现执行计划退化，立即设置 `ALTER TABLE SET (autovacuum_analyze_scale_factor = 0.02)` 并刷新统计；必要时临时禁用新索引 (`SET enable_indexscan = off`) 以恢复服务。
 
 ---
 

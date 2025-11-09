@@ -27,91 +27,92 @@ const (
 
 // Config defines the overall manager configuration schema.
 type Config struct {
-	Manager    ManagerConfig    `yaml:"manager"`
-	Traders    []TraderConfig   `yaml:"traders"`
-	Monitoring MonitoringConfig `yaml:"monitoring"`
+	Manager    ManagerConfig    `yaml:"manager" json:"manager"`
+	Traders    []TraderConfig   `yaml:"traders" json:"traders"`
+	Monitoring MonitoringConfig `yaml:"monitoring" json:"monitoring"`
 
-	baseDir string
+	baseDir string `json:"-"`
 }
 
 type ManagerConfig struct {
-	TotalEquityUSD      float64       `yaml:"total_equity_usd"`
-	ReserveEquityPct    float64       `yaml:"reserve_equity_pct"`
-	AllocationStrategy  string        `yaml:"allocation_strategy"`
-	RebalanceInterval   time.Duration `yaml:"-"`
-	StateStorageBackend string        `yaml:"state_storage_backend"`
-	StateStoragePath    string        `yaml:"state_storage_path"`
+	TotalEquityUSD      float64       `yaml:"total_equity_usd" json:"total_equity_usd"`
+	ReserveEquityPct    float64       `yaml:"reserve_equity_pct" json:"reserve_equity_pct"`
+	AllocationStrategy  string        `yaml:"allocation_strategy" json:"allocation_strategy"`
+	RebalanceInterval   time.Duration `yaml:"-" json:"rebalance_interval_duration"`
+	StateStorageBackend string        `yaml:"state_storage_backend" json:"state_storage_backend"`
+	StateStoragePath    string        `yaml:"state_storage_path" json:"state_storage_path"`
 
-	RebalanceIntervalRaw string `yaml:"rebalance_interval"`
+	RebalanceIntervalRaw string `yaml:"rebalance_interval" json:"rebalance_interval"`
 }
 
 type TraderConfig struct {
-	ID                   string         `yaml:"id"`
-	Name                 string         `yaml:"name"`
-	ExchangeProvider     string         `yaml:"exchange_provider"`
-	MarketProvider       string         `yaml:"market_provider"`
-	OrderStyle           OrderStyle     `yaml:"order_style"`
-	MarketIOCSlippageBps float64        `yaml:"market_ioc_slippage_bps"`
-	PromptTemplate       string         `yaml:"prompt_template"`
-	ExecutorTemplate     string         `yaml:"executor_prompt_template"`
-	Model                string         `yaml:"model"`
-	DecisionInterval     time.Duration  `yaml:"-"`
-	RiskParams           RiskParameters `yaml:"risk_params"`
-	ExecGuards           ExecGuards     `yaml:"exec_guards"`
-	AllocationPct        float64        `yaml:"allocation_pct"`
-	AutoStart            bool           `yaml:"auto_start"`
-	JournalEnabled       bool           `yaml:"journal_enabled"`
-	JournalDir           string         `yaml:"journal_dir"`
+	ID                   string         `yaml:"id" json:"id"`
+	Name                 string         `yaml:"name" json:"name"`
+	ExchangeProvider     string         `yaml:"exchange_provider" json:"exchange_provider"`
+	MarketProvider       string         `yaml:"market_provider" json:"market_provider"`
+	OrderStyle           OrderStyle     `yaml:"order_style" json:"order_style"`
+	MarketIOCSlippageBps float64        `yaml:"market_ioc_slippage_bps" json:"market_ioc_slippage_bps"`
+	PromptTemplate       string         `yaml:"prompt_template" json:"prompt_template"`
+	ExecutorTemplate     string         `yaml:"executor_prompt_template" json:"executor_prompt_template"`
+	Model                string         `yaml:"model" json:"model"`
+	DecisionInterval     time.Duration  `yaml:"-" json:"decision_interval_duration"`
+	RiskParams           RiskParameters `yaml:"risk_params" json:"risk_params"`
+	ExecGuards           ExecGuards     `yaml:"exec_guards" json:"exec_guards"`
+	AllocationPct        float64        `yaml:"allocation_pct" json:"allocation_pct"`
+	AutoStart            bool           `yaml:"auto_start" json:"auto_start"`
+	JournalEnabled       bool           `yaml:"journal_enabled" json:"journal_enabled"`
+	JournalDir           string         `yaml:"journal_dir" json:"journal_dir"`
+	Version              int64          `yaml:"-" json:"-"`
 
-	DecisionIntervalRaw string `yaml:"decision_interval"`
+	DecisionIntervalRaw string `yaml:"decision_interval" json:"decision_interval"`
 }
 
 // ExecGuards defines optional hard guards applied at execution/validation time.
 type ExecGuards struct {
-	MaxNewPositionsPerCycle int     `yaml:"max_new_positions_per_cycle"`
-	LiquidityThresholdUSD   float64 `yaml:"liquidity_threshold_usd"`
-	MaxMarginUsagePct       float64 `yaml:"max_margin_usage_pct"`
+	MaxNewPositionsPerCycle int     `yaml:"max_new_positions_per_cycle" json:"max_new_positions_per_cycle"`
+	LiquidityThresholdUSD   float64 `yaml:"liquidity_threshold_usd" json:"liquidity_threshold_usd"`
+	MaxMarginUsagePct       float64 `yaml:"max_margin_usage_pct" json:"max_margin_usage_pct"`
 
-	BTCETHMinEquityMultiple float64 `yaml:"btceth_position_value_min_equity_multiple"`
-	BTCETHMaxEquityMultiple float64 `yaml:"btceth_position_value_max_equity_multiple"`
-	AltMinEquityMultiple    float64 `yaml:"alt_position_value_min_equity_multiple"`
-	AltMaxEquityMultiple    float64 `yaml:"alt_position_value_max_equity_multiple"`
+	BTCETHMinEquityMultiple float64 `yaml:"btceth_position_value_min_equity_multiple" json:"btceth_position_value_min_equity_multiple"`
+	BTCETHMaxEquityMultiple float64 `yaml:"btceth_position_value_max_equity_multiple" json:"btceth_position_value_max_equity_multiple"`
+	AltMinEquityMultiple    float64 `yaml:"alt_position_value_min_equity_multiple" json:"alt_position_value_min_equity_multiple"`
+	AltMaxEquityMultiple    float64 `yaml:"alt_position_value_max_equity_multiple" json:"alt_position_value_max_equity_multiple"`
 
-	CooldownAfterClose    time.Duration `yaml:"-"`
-	CooldownAfterCloseRaw string        `yaml:"cooldown_after_close"`
+	CooldownAfterClose    time.Duration `yaml:"-" json:"cooldown_after_close_duration"`
+	CooldownAfterCloseRaw string        `yaml:"cooldown_after_close" json:"cooldown_after_close"`
 	// Feature toggles (default true if omitted)
-	EnableLiquidityGuard   *bool `yaml:"enable_liquidity_guard"`
-	EnableMarginUsageGuard *bool `yaml:"enable_margin_usage_guard"`
-	EnableValueBandGuard   *bool `yaml:"enable_value_band_guard"`
-	EnableCooldownGuard    *bool `yaml:"enable_cooldown_guard"`
+	EnableLiquidityGuard   *bool `yaml:"enable_liquidity_guard" json:"enable_liquidity_guard"`
+	EnableMarginUsageGuard *bool `yaml:"enable_margin_usage_guard" json:"enable_margin_usage_guard"`
+	EnableValueBandGuard   *bool `yaml:"enable_value_band_guard" json:"enable_value_band_guard"`
+	EnableCooldownGuard    *bool `yaml:"enable_cooldown_guard" json:"enable_cooldown_guard"`
 
 	// Candidate selection
-	CandidateLimit int `yaml:"candidate_limit"`
+	CandidateLimit int `yaml:"candidate_limit" json:"candidate_limit"`
 
 	// Performance gating
-	SharpePauseThreshold     float64       `yaml:"sharpe_pause_threshold"`
-	PauseDurationOnBreach    time.Duration `yaml:"-"`
-	PauseDurationOnBreachRaw string        `yaml:"pause_duration_on_breach"`
+	SharpePauseThreshold     float64       `yaml:"sharpe_pause_threshold" json:"sharpe_pause_threshold"`
+	PauseDurationOnBreach    time.Duration `yaml:"-" json:"pause_duration_on_breach_duration"`
+	PauseDurationOnBreachRaw string        `yaml:"pause_duration_on_breach" json:"pause_duration_on_breach"`
 }
 
 type RiskParameters struct {
-	MaxPositions       int     `yaml:"max_positions"`
-	MaxPositionSizeUSD float64 `yaml:"max_position_size_usd"`
-	MaxMarginUsagePct  float64 `yaml:"max_margin_usage_pct"`
-	MajorCoinLeverage  int     `yaml:"major_coin_leverage"`
-	AltcoinLeverage    int     `yaml:"altcoin_leverage"`
-	MinRiskRewardRatio float64 `yaml:"min_risk_reward_ratio"`
-	MinConfidence      int     `yaml:"min_confidence"`
-	StopLossEnabled    bool    `yaml:"stop_loss_enabled"`
-	TakeProfitEnabled  bool    `yaml:"take_profit_enabled"`
+	MaxPositions       int     `yaml:"max_positions" json:"max_positions"`
+	MaxPositionSizeUSD float64 `yaml:"max_position_size_usd" json:"max_position_size_usd"`
+	MaxMarginUsagePct  float64 `yaml:"max_margin_usage_pct" json:"max_margin_usage_pct"`
+	MajorCoinLeverage  int     `yaml:"major_coin_leverage" json:"major_coin_leverage"`
+	AltcoinLeverage    int     `yaml:"altcoin_leverage" json:"altcoin_leverage"`
+	MinRiskRewardRatio float64 `yaml:"min_risk_reward_ratio" json:"min_risk_reward_ratio"`
+	MinConfidence      int     `yaml:"min_confidence" json:"min_confidence"`
+	StopLossEnabled    bool    `yaml:"stop_loss_enabled" json:"stop_loss_enabled"`
+	TakeProfitEnabled  bool    `yaml:"take_profit_enabled" json:"take_profit_enabled"`
 }
 
 type MonitoringConfig struct {
-	UpdateInterval  time.Duration `yaml:"-"`
-	AlertWebhook    string        `yaml:"alert_webhook"`
-	MetricsExporter string        `yaml:"metrics_exporter"`
+	UpdateInterval  time.Duration `yaml:"-" json:"update_interval_duration"`
+	AlertWebhook    string        `yaml:"alert_webhook" json:"alert_webhook"`
+	MetricsExporter string        `yaml:"metrics_exporter" json:"metrics_exporter"`
 
-	UpdateIntervalRaw string `yaml:"update_interval"`
+	UpdateIntervalRaw string `yaml:"update_interval" json:"update_interval"`
 }
 
 // LoadConfig reads configuration from disk.

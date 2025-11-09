@@ -36,8 +36,9 @@ type PositionEvent struct {
 
 // DecisionCycleRecord is emitted after each decision loop for DB/cache mirroring.
 type DecisionCycleRecord struct {
-	TraderID string
-	Cycle    *journal.CycleRecord
+	TraderID      string
+	ConfigVersion int64
+	Cycle         *journal.CycleRecord
 }
 
 // AccountSyncSnapshot represents a normalized account/equity update.

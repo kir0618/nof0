@@ -21,6 +21,7 @@ import (
 	"nof0-api/pkg/journal"
 	"nof0-api/pkg/llm"
 	"nof0-api/pkg/market"
+	"nof0-api/pkg/repo"
 )
 
 const (
@@ -109,10 +110,30 @@ type Manager struct {
 
 	executorFactory ExecutorFactory
 	persistence     PersistenceService
+	configRepo      repo.TraderConfigRepository
+	runtimeRepo     repo.TraderRuntimeRepository
 
 	stopChan chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
+}
+
+// Option configures optional collaborators on the manager.
+type Option func(*Manager)
+
+// WithConfigRepo wires the trader configuration repository for sync/update flows.
+func WithConfigRepo(r repo.TraderConfigRepository) Option {
+	return func(m *Manager) {
+		m.configRepo = r
+	}
+}
+
+// WithRuntimeRepo wires the runtime state repository so the manager can persist
+// scheduling metadata for each trader.
+func WithRuntimeRepo(r repo.TraderRuntimeRepository) Option {
+	return func(m *Manager) {
+		m.runtimeRepo = r
+	}
 }
 
 // NewManager constructs a Manager with injected dependencies.
@@ -122,6 +143,7 @@ func NewManager(
 	exch map[string]exchange.Provider,
 	mkts map[string]market.Provider,
 	persist PersistenceService,
+	opts ...Option,
 ) *Manager {
 	if cfg == nil {
 		cfg = &Config{}
@@ -145,6 +167,11 @@ func NewManager(
 	for k, v := range mkts {
 		m.marketProviders[k] = v
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(m)
+		}
+	}
 	return m
 }
 
@@ -161,9 +188,12 @@ func InitializeManager(configPath string) (*Manager, error) {
 
 // RegisterTrader creates a VirtualTrader from the provided configuration and
 // attaches providers and executor instances.
-func (m *Manager) RegisterTrader(cfg TraderConfig) (*VirtualTrader, error) {
+func (m *Manager) RegisterTrader(ctx context.Context, cfg TraderConfig) (*VirtualTrader, error) {
 	if m == nil {
 		return nil, errors.New("manager: nil manager")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	tempCfg := &Config{
 		Manager:    ManagerConfig{},
@@ -203,6 +233,10 @@ func (m *Manager) RegisterTrader(cfg TraderConfig) (*VirtualTrader, error) {
 		return nil, fmt.Errorf("manager: create executor for trader %s: %w", cfg.ID, err)
 	}
 
+	version := cfg.Version
+	if version <= 0 {
+		version = 1
+	}
 	vt := &VirtualTrader{
 		ID:                   cfg.ID,
 		Name:                 cfg.Name,
@@ -225,6 +259,7 @@ func (m *Manager) RegisterTrader(cfg TraderConfig) (*VirtualTrader, error) {
 		VirtualPositions: make(map[string]VirtualPosition),
 		Cooldown:         make(map[string]time.Time),
 		JournalEnabled:   cfg.JournalEnabled,
+		ConfigVersion:    version,
 	}
 	if cfg.JournalEnabled {
 		dir := cfg.JournalDir
@@ -235,12 +270,146 @@ func (m *Manager) RegisterTrader(cfg TraderConfig) (*VirtualTrader, error) {
 		logx.Infof("manager: trader %s journaling enabled dir=%s", cfg.ID, dir)
 	}
 
+	shouldAutoStart := cfg.AutoStart
+	if run, ok := m.hydrateTraderFromState(ctx, vt); ok {
+		shouldAutoStart = run
+	}
 	m.traders[cfg.ID] = vt
-	if cfg.AutoStart {
+	if shouldAutoStart {
 		_ = vt.Start()
 	}
+	m.persistRuntimeState(ctx, vt)
 	logx.Infof("manager: registered trader id=%s name=%s allocation=%.2f%% exchange=%s market=%s model=%s order_style=%s auto_start=%t", vt.ID, vt.Name, cfg.AllocationPct, cfg.ExchangeProvider, cfg.MarketProvider, cfg.Model, cfg.OrderStyle, cfg.AutoStart)
 	return vt, nil
+}
+
+func (m *Manager) persistRuntimeState(ctx context.Context, trader *VirtualTrader) {
+	if m == nil || m.runtimeRepo == nil || trader == nil {
+		return
+	}
+	version := trader.ConfigVersion
+	if version <= 0 {
+		version = 1
+	}
+	record := repo.RuntimeStateRecord{
+		TraderID:            trader.ID,
+		ActiveConfigVersion: version,
+		IsRunning:           trader.State == TraderStateRunning,
+		Detail:              buildRuntimeStateDetail(trader),
+	}
+	if err := m.runtimeRepo.UpsertState(ctx, record); err != nil {
+		logx.WithContext(ctx).Errorf("manager: persist runtime state trader=%s err=%v", trader.ID, err)
+	}
+}
+
+func buildRuntimeStateDetail(trader *VirtualTrader) repo.RuntimeStateDetail {
+	if trader == nil {
+		return repo.RuntimeStateDetail{}
+	}
+	detail := repo.RuntimeStateDetail{}
+	if !trader.LastDecisionAt.IsZero() {
+		last := trader.LastDecisionAt.UTC()
+		var next *time.Time
+		if trader.DecisionInterval > 0 {
+			nextTime := last.Add(trader.DecisionInterval)
+			next = &nextTime
+		}
+		detail.Decision = &repo.RuntimeDecisionDetail{
+			LastAt: &last,
+			NextAt: next,
+		}
+	}
+	if !trader.PauseUntil.IsZero() && trader.PauseUntil.After(time.Now()) {
+		until := trader.PauseUntil.UTC()
+		reason := "pause"
+		if trader.State == TraderStatePaused {
+			reason = "manual"
+		}
+		detail.Pause = &repo.RuntimePauseDetail{
+			Until:  &until,
+			Reason: reason,
+		}
+	}
+	alloc := trader.ResourceAlloc
+	if alloc.AllocatedEquityUSD > 0 || alloc.MarginUsedUSD > 0 || alloc.AvailableBalanceUSD > 0 || alloc.CurrentEquityUSD > 0 {
+		detail.Allocation = &repo.RuntimeAllocationDetail{
+			EquityUSD:          alloc.CurrentEquityUSD,
+			UsedMarginUSD:      alloc.MarginUsedUSD,
+			AvailableMarginUSD: alloc.AvailableBalanceUSD,
+		}
+	}
+	if trader.Performance != nil {
+		detail.Performance = &repo.RuntimePerformanceDetail{
+			SharpeRatio: trader.Performance.SharpeRatio,
+			TotalPnLUSD: trader.Performance.TotalPnLUSD,
+		}
+	}
+	return detail
+}
+
+func (m *Manager) hydrateTraderFromState(ctx context.Context, trader *VirtualTrader) (bool, bool) {
+	if m == nil || m.runtimeRepo == nil || trader == nil {
+		return false, false
+	}
+	snapshot, err := m.runtimeRepo.GetState(ctx, trader.ID)
+	if err != nil {
+		logx.WithContext(ctx).Errorf("manager: load runtime state trader=%s err=%v", trader.ID, err)
+		return false, false
+	}
+	if snapshot == nil {
+		return false, false
+	}
+	if snapshot.ActiveConfigVersion > 0 {
+		if trader.ConfigVersion <= 0 || snapshot.ActiveConfigVersion > trader.ConfigVersion {
+			trader.ConfigVersion = snapshot.ActiveConfigVersion
+		}
+	}
+	if snapshot.Detail.Decision != nil && snapshot.Detail.Decision.LastAt != nil {
+		trader.LastDecisionAt = snapshot.Detail.Decision.LastAt.UTC()
+	}
+	if snapshot.Detail.Pause != nil && snapshot.Detail.Pause.Until != nil {
+		trader.PauseUntil = snapshot.Detail.Pause.Until.UTC()
+	}
+	if alloc := snapshot.Detail.Allocation; alloc != nil {
+		trader.ResourceAlloc.CurrentEquityUSD = alloc.EquityUSD
+		trader.ResourceAlloc.AvailableBalanceUSD = alloc.AvailableMarginUSD
+		trader.ResourceAlloc.MarginUsedUSD = alloc.UsedMarginUSD
+	}
+	if perf := snapshot.Detail.Performance; perf != nil {
+		if trader.Performance == nil {
+			trader.Performance = &PerformanceMetrics{}
+		}
+		trader.Performance.SharpeRatio = perf.SharpeRatio
+		trader.Performance.TotalPnLUSD = perf.TotalPnLUSD
+	}
+	if snapshot.IsRunning {
+		trader.State = TraderStateRunning
+	} else {
+		trader.State = TraderStateStopped
+	}
+	if cooldowns, err := m.runtimeRepo.ListCooldowns(ctx, trader.ID); err != nil {
+		logx.WithContext(ctx).Errorf("manager: load cooldowns trader=%s err=%v", trader.ID, err)
+	} else {
+		trader.mu.Lock()
+		for _, cd := range cooldowns {
+			if strings.TrimSpace(cd.Symbol) == "" {
+				continue
+			}
+			ts := cd.Detail.LastPositionClosed
+			if ts.IsZero() {
+				ts = cd.Until
+			}
+			if ts.IsZero() {
+				continue
+			}
+			if trader.Cooldown == nil {
+				trader.Cooldown = make(map[string]time.Time)
+			}
+			trader.Cooldown[strings.ToUpper(cd.Symbol)] = ts.UTC()
+		}
+		trader.mu.Unlock()
+	}
+	return snapshot.IsRunning, true
 }
 
 // UnregisterTrader stops and removes a trader from registry.
@@ -407,6 +576,7 @@ func (m *Manager) RunTradingLoop(ctx context.Context) error {
 					}
 				}
 				t.RecordDecision(time.Now())
+				m.persistRuntimeState(ctx, t)
 				if syncErr := m.SyncTraderPositions(t.ID); syncErr != nil {
 					logx.WithContext(ctx).Errorf("manager: trader %s sync positions error: %v", t.ID, syncErr)
 				}
@@ -481,9 +651,25 @@ func (m *Manager) ExecuteDecision(trader *VirtualTrader, decision *executorpkg.D
 		}
 		logx.Infof("manager: trader %s closed position symbol=%s action=%s", trader.ID, decision.Symbol, decision.Action)
 		// Mark cooldown timestamp on successful close
+		closeTime := time.Now()
 		trader.mu.Lock()
-		trader.Cooldown[decision.Symbol] = time.Now()
+		trader.Cooldown[decision.Symbol] = closeTime
 		trader.mu.Unlock()
+		if m.runtimeRepo != nil && trader.ExecGuards.CooldownAfterClose > 0 {
+			until := closeTime.Add(trader.ExecGuards.CooldownAfterClose)
+			record := repo.SymbolCooldownRecord{
+				TraderID: trader.ID,
+				Symbol:   strings.ToUpper(decision.Symbol),
+				Until:    until,
+				Detail: repo.SymbolCooldownDetail{
+					Reason:             "close_position",
+					LastPositionClosed: closeTime.UTC(),
+				},
+			}
+			if err := m.runtimeRepo.UpsertCooldown(ctx, record); err != nil {
+				logx.WithContext(ctx).Errorf("manager: persist cooldown trader=%s symbol=%s err=%v", trader.ID, decision.Symbol, err)
+			}
+		}
 		fillPrice, fillQty, ok := parseOrderFill(orderResp)
 		if !ok {
 			fillPrice = closeSnapPrice
@@ -1151,12 +1337,16 @@ func (m *Manager) recordDecisionCycle(record DecisionCycleRecord) {
 	if record.TraderID == "" && record.Cycle != nil {
 		record.TraderID = record.Cycle.TraderID
 	}
+	if record.ConfigVersion == 0 && record.Cycle != nil && record.Cycle.ConfigVersion > 0 {
+		record.ConfigVersion = record.Cycle.ConfigVersion
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	err := m.persistence.RecordDecisionCycle(ctx, record)
 	logPersistenceError(err, "decision cycle persistence failed", map[string]any{
-		"trader_id": record.TraderID,
-		"success":   record.Cycle.Success,
+		"trader_id":      record.TraderID,
+		"success":        record.Cycle.Success,
+		"config_version": record.ConfigVersion,
 	})
 }
 
@@ -1255,6 +1445,7 @@ func (m *Manager) writeJournalRecord(t *VirtualTrader, ectx *executorpkg.Context
 	}
 	rec := &journal.CycleRecord{
 		TraderID:      t.ID,
+		ConfigVersion: t.ConfigVersion,
 		PromptDigest:  promptDigest,
 		CoTTrace:      cot,
 		DecisionsJSON: decisionsJSON,
@@ -1273,8 +1464,9 @@ func (m *Manager) writeJournalRecord(t *VirtualTrader, ectx *executorpkg.Context
 		_, err = t.Journal.WriteCycle(rec)
 	}
 	m.recordDecisionCycle(DecisionCycleRecord{
-		TraderID: t.ID,
-		Cycle:    rec,
+		TraderID:      t.ID,
+		ConfigVersion: t.ConfigVersion,
+		Cycle:         rec,
 	})
 	return err
 }

@@ -117,6 +117,36 @@ func PositionsHashKey(modelID string) string {
 	return formatKey("positions", modelID)
 }
 
+// TraderPositionsHashKey is the consolidated hash for all trader positions.
+func TraderPositionsHashKey() string {
+	return formatKey("trader", "positions")
+}
+
+// TraderTradesRecentHashKey is the consolidated hash for recent trades.
+func TraderTradesRecentHashKey() string {
+	return formatKey("trader", "trades_recent")
+}
+
+// TraderAnalyticsHashKey stores analytics snapshots per trader.
+func TraderAnalyticsHashKey() string {
+	return formatKey("trader", "analytics")
+}
+
+// TraderSinceInceptionHashKey stores lifetime analytics per trader.
+func TraderSinceInceptionHashKey() string {
+	return formatKey("trader", "since_inception")
+}
+
+// TraderDecisionLastHashKey stores the latest decision summary per trader.
+func TraderDecisionLastHashKey() string {
+	return formatKey("trader", "decision_last")
+}
+
+// TraderHashField normalizes trader ids for hash access.
+func TraderHashField(traderID string) string {
+	return strings.ToLower(strings.TrimSpace(traderID))
+}
+
 // PositionsLockKey is used as a short-lived recompute lock.
 func PositionsLockKey(modelID string) string {
 	return formatKey("lock", "positions", modelID)

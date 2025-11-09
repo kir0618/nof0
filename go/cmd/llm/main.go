@@ -377,21 +377,19 @@ func main() {
 			TradesModel:               svcCtx.TradesModel,
 			SnapshotsModel:            svcCtx.AccountEquitySnapshotsModel,
 			DecisionModel:             svcCtx.DecisionCyclesModel,
-			AnalyticsModel:            svcCtx.ModelAnalyticsModel,
 			Cache:                     svcCtx.Cache,
+			Redis:                     svcCtx.Redis,
 			TTL:                       ttlSet,
 			ConversationsModel:        svcCtx.ConversationsModel,
 			ConversationMessagesModel: svcCtx.ConversationMessagesModel,
 		})
 		marketPersist = marketpersist.NewService(marketpersist.Config{
-			SQLConn:          svcCtx.DBConn,
-			AssetsModel:      svcCtx.MarketAssetsModel,
-			AssetCtxModel:    svcCtx.MarketAssetCtxModel,
-			PriceLatestModel: svcCtx.PriceLatestModel,
-			PriceTicksModel:  svcCtx.PriceTicksModel,
-			Cache:            svcCtx.Cache,
-			Redis:            svcCtx.Redis,
-			TTL:              ttlSet,
+			SQLConn:         svcCtx.DBConn,
+			AssetsModel:     svcCtx.MarketAssetsModel,
+			PriceTicksModel: svcCtx.PriceTicksModel,
+			Cache:           svcCtx.Cache,
+			Redis:           svcCtx.Redis,
+			TTL:             ttlSet,
 		})
 		if persistService == nil {
 			logx.Slowf("manager persistence disabled: postgres/cache not configured in %s", *appConfig)
@@ -416,11 +414,52 @@ func main() {
 	}
 	execFactory := managerpkg.NewBasicExecutorFactory(llmClient, conversationRecorder)
 
-	mgr := managerpkg.NewManager(managerCfg, execFactory, exchangeProviders, filteredMarkets, persistService)
+	traderSources := managerCfg.Traders
+	if svcCtx != nil && svcCtx.TraderConfigRepo != nil && len(managerCfg.Traders) > 0 {
+		records, err := managerpkg.TraderConfigsToRecords(managerCfg.Traders, "system", "yaml_sync")
+		if err != nil {
+			logx.Errorf("manager: serialize trader configs for sync: %v", err)
+		} else {
+			syncCtx := context.Background()
+			if summary, syncErr := svcCtx.TraderConfigRepo.Sync(syncCtx, records); syncErr != nil {
+				logx.Errorf("manager: sync trader configs: %v", syncErr)
+			} else {
+				logx.Infof("manager: trader config sync inserted=%d updated=%d unchanged=%d", len(summary.Inserted), len(summary.Updated), len(summary.Unchanged))
+				if rows, listErr := svcCtx.TraderConfigRepo.ListAll(syncCtx); listErr != nil {
+					logx.Errorf("manager: list trader configs: %v", listErr)
+				} else if len(rows) > 0 {
+					dbTraders := make([]managerpkg.TraderConfig, 0, len(rows))
+					for _, row := range rows {
+						cfg, decodeErr := managerpkg.TraderConfigFromModel(row)
+						if decodeErr != nil {
+							logx.Errorf("manager: decode trader config %s: %v", row.Id, decodeErr)
+							continue
+						}
+						dbTraders = append(dbTraders, *cfg)
+					}
+					if len(dbTraders) > 0 {
+						traderSources = dbTraders
+					}
+				}
+			}
+		}
+	}
 
-	traderIDs := make([]string, 0, len(managerCfg.Traders))
-	for _, traderCfg := range managerCfg.Traders {
-		vt, regErr := mgr.RegisterTrader(traderCfg)
+	var managerOpts []managerpkg.Option
+	if svcCtx != nil {
+		if svcCtx.TraderConfigRepo != nil {
+			managerOpts = append(managerOpts, managerpkg.WithConfigRepo(svcCtx.TraderConfigRepo))
+		}
+		if svcCtx.TraderRuntimeRepo != nil {
+			managerOpts = append(managerOpts, managerpkg.WithRuntimeRepo(svcCtx.TraderRuntimeRepo))
+		}
+	}
+
+	mgr := managerpkg.NewManager(managerCfg, execFactory, exchangeProviders, filteredMarkets, persistService, managerOpts...)
+
+	traderIDs := make([]string, 0, len(traderSources))
+	for _, traderCfg := range traderSources {
+		vt, regErr := mgr.RegisterTrader(context.Background(), traderCfg)
 		if regErr != nil {
 			fatalf("register trader %s: %v", traderCfg.ID, regErr)
 		}

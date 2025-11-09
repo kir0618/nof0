@@ -12,6 +12,7 @@ import (
 type CycleRecord struct {
 	Timestamp     time.Time              `json:"timestamp"`
 	TraderID      string                 `json:"trader_id"`
+	ConfigVersion int64                  `json:"config_version,omitempty"`
 	CycleNumber   int                    `json:"cycle_number"`
 	PromptDigest  string                 `json:"prompt_digest,omitempty"`
 	CoTTrace      string                 `json:"cot_trace,omitempty"`

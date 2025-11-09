@@ -6,8 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -36,7 +34,7 @@ func main() {
 	logx.Infof("connecting to %s", dsn)
 
 	if truncate {
-		mustExec(ctx, conn, `TRUNCATE TABLE conversation_messages, conversations, model_analytics, trades, positions, account_equity_snapshots, accounts, price_ticks, price_latest, symbols, models RESTART IDENTITY CASCADE`)
+		mustExec(ctx, conn, `TRUNCATE TABLE conversation_messages, conversations, trades, positions, account_equity_snapshots, accounts, price_ticks, symbols, models RESTART IDENTITY CASCADE`)
 	}
 
 	// Use existing DataLoader to parse JSON
@@ -46,14 +44,9 @@ func main() {
 	modelSet := map[string]struct{}{}
 	symbolSet := map[string]struct{}{}
 
-	// 1) Crypto prices -> price_latest (+symbols)
-	if resp, err := dl.LoadCryptoPrices(); err == nil {
-		for sym, p := range resp.Prices {
-			symbolSet[sym] = struct{}{}
-			upsertSymbol(ctx, conn, sym)
-			upsertPriceLatest(ctx, conn, sym, p.Price, p.Timestamp)
-		}
-		log.Printf("imported crypto prices: %d symbols", len(resp.Prices))
+	// 1) Crypto prices were previously stored in price_latest; Redis now serves as source of truth.
+	if _, err := dl.LoadCryptoPrices(); err == nil {
+		log.Printf("skip crypto prices: table removed (Redis-only)")
 	} else {
 		log.Printf("skip crypto prices: %v", err)
 	}
@@ -103,33 +96,9 @@ func main() {
 		log.Printf("skip positions: %v", err)
 	}
 
-	// 5) Analytics -> model_analytics
-	if resp, err := dl.LoadAnalytics(); err == nil {
-		// store per analytics item
-		for _, a := range resp.Analytics {
-			if a.ModelId != "" {
-				modelSet[a.ModelId] = struct{}{}
-				upsertModel(ctx, conn, a.ModelId, a.ModelId)
-			}
-		}
-		// read raw file and write jsonb payload grouped by model
-		rawFile := filepath.Join(dataPath, "analytics.json")
-		raw, _ := os.ReadFile(rawFile)
-		var tmp struct {
-			Analytics []json.RawMessage `json:"analytics"`
-		}
-		if err := json.Unmarshal(raw, &tmp); err == nil {
-			for _, item := range tmp.Analytics {
-				var probe struct {
-					ModelId string `json:"model_id"`
-				}
-				_ = json.Unmarshal(item, &probe)
-				if probe.ModelId != "" {
-					upsertModelAnalytics(ctx, conn, probe.ModelId, item)
-				}
-			}
-		}
-		log.Printf("imported analytics payloads: %d", len(resp.Analytics))
+	// 5) Analytics table removed; data now flows through Redis caches only.
+	if _, err := dl.LoadAnalytics(); err == nil {
+		log.Printf("skip analytics import: table removed (Redis-only)")
 	} else {
 		log.Printf("skip analytics: %v", err)
 	}
@@ -211,12 +180,6 @@ func upsertSymbol(ctx context.Context, conn sqlx.SqlConn, symbol string) {
 	mustExec(ctx, conn, q, strings.TrimSpace(symbol))
 }
 
-func upsertPriceLatest(ctx context.Context, conn sqlx.SqlConn, symbol string, price float64, ts int64) {
-	q := `INSERT INTO price_latest(symbol, price, ts_ms) VALUES ($1,$2,$3)
-          ON CONFLICT (symbol) DO UPDATE SET price=EXCLUDED.price, ts_ms=EXCLUDED.ts_ms`
-	mustExec(ctx, conn, q, symbol, price, ts)
-}
-
 func insertEquitySnapshot(ctx context.Context, conn sqlx.SqlConn, modelId string, ts int64, equity float64) {
 	q := `INSERT INTO account_equity_snapshots(model_id, ts_ms, equity_usd) VALUES ($1,$2,$3)`
 	mustExec(ctx, conn, q, modelId, ts, equity)
@@ -261,12 +224,6 @@ func insertPositionOpen(ctx context.Context, conn sqlx.SqlConn, modelId, symbol 
 	pid := fmt.Sprintf("%s:%s:%d", modelId, symbol, entryMs)
 	side := "long" // 无法从示例数据稳定推断多空，默认 long；后续由导入源决定
 	mustExec(ctx, conn, q, pid, modelId, symbol, side, pos.EntryPrice, pos.Quantity, nullFloat(pos.Leverage), nullFloat(pos.Confidence), entryMs)
-}
-
-func upsertModelAnalytics(ctx context.Context, conn sqlx.SqlConn, modelId string, payload json.RawMessage) {
-	q := `INSERT INTO model_analytics(model_id, payload) VALUES ($1,$2)
-          ON CONFLICT (model_id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=now()`
-	mustExec(ctx, conn, q, modelId, string(payload))
 }
 
 func insertConversation(ctx context.Context, conn sqlx.SqlConn, modelId string) int64 {

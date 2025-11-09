@@ -2,7 +2,9 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/lib/pq"
 	"github.com/zeromicro/go-zero/core/stores/cache"
@@ -16,29 +18,17 @@ var _ PositionsModel = (*customPositionsModel)(nil)
 // easily detect unset values while working with idiomatic Go types.
 type PositionRecord struct {
 	ID               string
-	ModelID          string
+	TraderID         string
 	ExchangeProvider string
 	Symbol           string
 	Side             string
 	Status           string
-	EntryOid         *int64
-	RiskUsd          *float64
-	Confidence       *float64
-	IndexCol         []byte
-	ExitPlan         []byte
 	EntryTimeMs      int64
 	EntryPrice       float64
-	TpOid            *int64
-	Margin           *float64
-	WaitForFill      bool
-	SlOid            *int64
-	CurrentPrice     *float64
-	ClosedPnl        *float64
-	LiquidationPrice *float64
-	Commission       *float64
-	Leverage         *float64
-	Slippage         *float64
 	Quantity         float64
+	Leverage         *float64
+	Confidence       *float64
+	RiskUsd          *float64
 	UnrealizedPnl    *float64
 }
 
@@ -62,47 +52,28 @@ func NewPositionsModel(conn sqlx.SqlConn, c cache.CacheConf, opts ...cache.Optio
 	}
 }
 
-// ActiveByModels returns all open positions grouped by model ID. When modelIDs
+// ActiveByModels returns all open positions grouped by trader ID. When modelIDs
 // is empty, it returns every open position.
 func (m *customPositionsModel) ActiveByModels(ctx context.Context, modelIDs []string) (map[string][]PositionRecord, error) {
 	const baseQuery = `
 SELECT
     id,
-    model_id,
-    exchange_provider,
+    trader_id,
     symbol,
     side,
     status,
-    entry_oid,
-    risk_usd,
-    confidence,
-    index_col,
-    exit_plan,
-    entry_time_ms,
-    entry_price,
-    tp_oid,
-    margin,
-    wait_for_fill,
-    sl_oid,
-    current_price,
-    closed_pnl,
-    liquidation_price,
-    commission,
-    leverage,
-    slippage,
-    quantity,
-    unrealized_pnl
+    detail
 FROM public.positions
 WHERE status = 'open'
 %s
-ORDER BY model_id, symbol`
+ORDER BY trader_id, symbol`
 
 	var (
 		args   []any
 		clause string
 	)
 	if len(modelIDs) > 0 {
-		clause = "AND model_id = ANY($1)"
+		clause = "AND trader_id = ANY($1)"
 		args = append(args, pq.Array(modelIDs))
 	}
 
@@ -116,81 +87,77 @@ ORDER BY model_id, symbol`
 	result := make(map[string][]PositionRecord)
 	for i := range rows {
 		rec := buildPositionRecord(&rows[i])
-		result[rows[i].ModelId] = append(result[rows[i].ModelId], rec)
+		result[rows[i].TraderId] = append(result[rows[i].TraderId], rec)
 	}
 	return result, nil
 }
 
 func buildPositionRecord(row *Positions) PositionRecord {
+	detail := decodePositionDetail(row.Detail)
 	rec := PositionRecord{
 		ID:               row.Id,
-		ModelID:          row.ModelId,
-		ExchangeProvider: row.ExchangeProvider,
+		TraderID:         row.TraderId,
+		ExchangeProvider: detail.Exchange.Provider,
 		Symbol:           row.Symbol,
 		Side:             row.Side,
 		Status:           row.Status,
-		EntryTimeMs:      row.EntryTimeMs,
-		EntryPrice:       row.EntryPrice,
-		WaitForFill:      row.WaitForFill,
-		Quantity:         row.Quantity,
+		EntryTimeMs:      detail.Entry.TimeMs,
+		EntryPrice:       detail.Entry.Price,
+		Quantity:         detail.Entry.Quantity,
 	}
-	if row.EntryOid.Valid {
-		value := row.EntryOid.Int64
-		rec.EntryOid = &value
-	}
-	if row.RiskUsd.Valid {
-		value := row.RiskUsd.Float64
-		rec.RiskUsd = &value
-	}
-	if row.Confidence.Valid {
-		value := row.Confidence.Float64
-		rec.Confidence = &value
-	}
-	if row.IndexCol.Valid {
-		rec.IndexCol = []byte(row.IndexCol.String)
-	}
-	if row.ExitPlan.Valid {
-		rec.ExitPlan = []byte(row.ExitPlan.String)
-	}
-	if row.TpOid.Valid {
-		value := row.TpOid.Int64
-		rec.TpOid = &value
-	}
-	if row.Margin.Valid {
-		value := row.Margin.Float64
-		rec.Margin = &value
-	}
-	if row.SlOid.Valid {
-		value := row.SlOid.Int64
-		rec.SlOid = &value
-	}
-	if row.CurrentPrice.Valid {
-		value := row.CurrentPrice.Float64
-		rec.CurrentPrice = &value
-	}
-	if row.ClosedPnl.Valid {
-		value := row.ClosedPnl.Float64
-		rec.ClosedPnl = &value
-	}
-	if row.LiquidationPrice.Valid {
-		value := row.LiquidationPrice.Float64
-		rec.LiquidationPrice = &value
-	}
-	if row.Commission.Valid {
-		value := row.Commission.Float64
-		rec.Commission = &value
-	}
-	if row.Leverage.Valid {
-		value := row.Leverage.Float64
+	if detail.Entry.Leverage != 0 {
+		value := detail.Entry.Leverage
 		rec.Leverage = &value
 	}
-	if row.Slippage.Valid {
-		value := row.Slippage.Float64
-		rec.Slippage = &value
+	if detail.Risk.Confidence != 0 {
+		value := detail.Risk.Confidence
+		rec.Confidence = &value
 	}
-	if row.UnrealizedPnl.Valid {
-		value := row.UnrealizedPnl.Float64
+	if detail.Risk.RiskUSD != 0 {
+		value := detail.Risk.RiskUSD
+		rec.RiskUsd = &value
+	}
+	if detail.Metrics.UnrealizedPnL != 0 {
+		value := detail.Metrics.UnrealizedPnL
 		rec.UnrealizedPnl = &value
 	}
 	return rec
+}
+
+type positionDetail struct {
+	Entry    positionEntryDetail    `json:"entry"`
+	Exchange positionExchangeDetail `json:"exchange"`
+	Risk     positionRiskDetail     `json:"risk"`
+	Metrics  positionMetricsDetail  `json:"metrics"`
+}
+
+type positionEntryDetail struct {
+	Price    float64 `json:"price"`
+	Quantity float64 `json:"quantity"`
+	TimeMs   int64   `json:"time_ms"`
+	Leverage float64 `json:"leverage"`
+}
+
+type positionExchangeDetail struct {
+	Provider string `json:"provider"`
+}
+
+type positionRiskDetail struct {
+	Confidence float64 `json:"confidence"`
+	RiskUSD    float64 `json:"risk_usd"`
+}
+
+type positionMetricsDetail struct {
+	UnrealizedPnL float64 `json:"unrealized_pnl"`
+}
+
+func decodePositionDetail(raw string) positionDetail {
+	if strings.TrimSpace(raw) == "" {
+		return positionDetail{}
+	}
+	var detail positionDetail
+	if err := json.Unmarshal([]byte(raw), &detail); err != nil {
+		return positionDetail{}
+	}
+	return detail
 }

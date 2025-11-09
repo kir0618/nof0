@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS price_latest CASCADE;
+DROP TABLE IF EXISTS market_asset_ctx CASCADE;
+DROP TABLE IF EXISTS model_analytics CASCADE;

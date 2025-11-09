@@ -29,26 +29,22 @@ const (
 
 // Service implements market data persistence and caching hooks.
 type Service struct {
-	sqlConn          sqlx.SqlConn
-	assetsModel      model.MarketAssetsModel
-	assetCtxModel    model.MarketAssetCtxModel
-	priceLatestModel model.PriceLatestModel
-	priceTicksModel  model.PriceTicksModel
-	cache            gocache.Cache
-	redis            *redis.Redis
-	ttl              cachekeys.TTLSet
+	sqlConn         sqlx.SqlConn
+	assetsModel     model.MarketAssetsModel
+	priceTicksModel model.PriceTicksModel
+	cache           gocache.Cache
+	redis           *redis.Redis
+	ttl             cachekeys.TTLSet
 }
 
 // Config enumerates dependencies required to persist market data.
 type Config struct {
-	SQLConn          sqlx.SqlConn
-	AssetsModel      model.MarketAssetsModel
-	AssetCtxModel    model.MarketAssetCtxModel
-	PriceLatestModel model.PriceLatestModel
-	PriceTicksModel  model.PriceTicksModel
-	Cache            gocache.Cache
-	Redis            *redis.Redis
-	TTL              cachekeys.TTLSet
+	SQLConn         sqlx.SqlConn
+	AssetsModel     model.MarketAssetsModel
+	PriceTicksModel model.PriceTicksModel
+	Cache           gocache.Cache
+	Redis           *redis.Redis
+	TTL             cachekeys.TTLSet
 }
 
 // NewService wires a market persistence service. Returns nil when dependencies missing.
@@ -57,14 +53,12 @@ func NewService(cfg Config) market.Persistence {
 		return nil
 	}
 	return &Service{
-		sqlConn:          cfg.SQLConn,
-		assetsModel:      cfg.AssetsModel,
-		assetCtxModel:    cfg.AssetCtxModel,
-		priceLatestModel: cfg.PriceLatestModel,
-		priceTicksModel:  cfg.PriceTicksModel,
-		cache:            cfg.Cache,
-		redis:            cfg.Redis,
-		ttl:              cfg.TTL,
+		sqlConn:         cfg.SQLConn,
+		assetsModel:     cfg.AssetsModel,
+		priceTicksModel: cfg.PriceTicksModel,
+		cache:           cfg.Cache,
+		redis:           cfg.Redis,
+		ttl:             cfg.TTL,
 	}
 }
 
@@ -174,42 +168,6 @@ func (s *Service) RecordSnapshot(ctx context.Context, provider string, snapshot 
 	}
 	now := time.Now().UTC()
 	price := snapshot.Price.Last
-	raw, _ := json.Marshal(snapshot)
-	priceStmt := `
-INSERT INTO public.price_latest (provider, symbol, price, ts_ms, raw, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-ON CONFLICT (provider, symbol) DO UPDATE SET
-    price = EXCLUDED.price,
-    ts_ms = EXCLUDED.ts_ms,
-    raw = EXCLUDED.raw,
-    updated_at = NOW();`
-	if _, err := s.sqlConn.ExecCtx(ctx, priceStmt, provider, snapshot.Symbol, price, now.UnixMilli(), string(raw)); err != nil {
-		return err
-	}
-
-	ctxStmt := `
-INSERT INTO public.market_asset_ctx (
-    provider, symbol, funding, open_interest, oracle_px, mark_px, mid_px, impact_pxs, prev_day_px, day_ntl_vlm, day_base_vlm, created_at, updated_at
-) VALUES (
-    $1, $2, $3, $4, NULL, $5, NULL, NULL, NULL, NULL, NULL, NOW(), NOW()
-)
-ON CONFLICT (provider, symbol) DO UPDATE SET
-    funding = EXCLUDED.funding,
-    open_interest = EXCLUDED.open_interest,
-    mark_px = EXCLUDED.mark_px,
-    updated_at = NOW();`
-	funding := sql.NullFloat64{}
-	if snapshot.Funding != nil {
-		funding = sql.NullFloat64{Float64: snapshot.Funding.Rate, Valid: true}
-	}
-	openInterest := sql.NullFloat64{}
-	if snapshot.OpenInterest != nil {
-		openInterest = sql.NullFloat64{Float64: snapshot.OpenInterest.Latest, Valid: true}
-	}
-	if _, err := s.sqlConn.ExecCtx(ctx, ctxStmt, provider, snapshot.Symbol, funding, openInterest, price); err != nil {
-		return err
-	}
-
 	s.cachePrice(ctx, provider, snapshot.Symbol, price, now)
 	s.cacheMarketCtx(ctx, provider, snapshot)
 	s.updateCryptoPrices(ctx, provider, snapshot.Symbol, price)

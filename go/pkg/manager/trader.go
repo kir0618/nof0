@@ -100,6 +100,7 @@ type VirtualTrader struct {
 	RiskParams           RiskParameters
 	ExecGuards           ExecGuards
 	ResourceAlloc        ResourceAllocation
+	ConfigVersion        int64
 	State                TraderState
 	Performance          *PerformanceMetrics
 	LastDecisionAt       time.Time

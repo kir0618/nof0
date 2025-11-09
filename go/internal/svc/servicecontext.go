@@ -26,6 +26,7 @@ import (
 	managerpkg "nof0-api/pkg/manager"
 	marketpkg "nof0-api/pkg/market"
 	_ "nof0-api/pkg/market/exchanges/hyperliquid"
+	"nof0-api/pkg/repo"
 )
 
 type ServiceContext struct {
@@ -55,18 +56,21 @@ type ServiceContext struct {
 	ModelsModel                 model.ModelsModel
 	SymbolsModel                model.SymbolsModel
 	PriceTicksModel             model.PriceTicksModel
-	PriceLatestModel            model.PriceLatestModel
 	AccountsModel               model.AccountsModel
 	AccountEquitySnapshotsModel model.AccountEquitySnapshotsModel
 	PositionsModel              model.PositionsModel
 	TradesModel                 model.TradesModel
-	ModelAnalyticsModel         model.ModelAnalyticsModel
 	ConversationsModel          model.ConversationsModel
 	ConversationMessagesModel   model.ConversationMessagesModel
 	DecisionCyclesModel         model.DecisionCyclesModel
 	MarketAssetsModel           model.MarketAssetsModel
-	MarketAssetCtxModel         model.MarketAssetCtxModel
 	TraderStateModel            model.TraderStateModel
+	TraderConfigModel           model.TraderConfigModel
+	TraderConfigHistoryModel    model.TraderConfigHistoryModel
+	TraderRuntimeStateModel     model.TraderRuntimeStateModel
+	TraderSymbolCooldownsModel  model.TraderSymbolCooldownsModel
+	TraderConfigRepo            repo.TraderConfigRepository
+	TraderRuntimeRepo           repo.TraderRuntimeRepository
 }
 
 func NewServiceContext(c config.Config, mainConfigPath string) *ServiceContext {
@@ -95,6 +99,7 @@ func NewServiceContext(c config.Config, mainConfigPath string) *ServiceContext {
 			}
 		}
 	}
+	var rawDB *sql.DB
 	if strings.TrimSpace(c.Postgres.DataSource) != "" {
 		if !hasCache {
 			log.Fatalf("cache configuration required when postgres is enabled")
@@ -105,6 +110,7 @@ func NewServiceContext(c config.Config, mainConfigPath string) *ServiceContext {
 			log.Fatalf("failed to init postgres raw db: %v", err)
 		}
 		applyPostgresPool(raw, c.Postgres)
+		rawDB = raw
 		svc.DBConn = conn
 		if svc.Cache != nil {
 			cached := sqlc.NewConnWithCache(conn, svc.Cache)
@@ -272,18 +278,30 @@ func NewServiceContext(c config.Config, mainConfigPath string) *ServiceContext {
 		svc.ModelsModel = model.NewModelsModel(conn, cacheNodes, cacheOpts...)
 		svc.SymbolsModel = model.NewSymbolsModel(conn, cacheNodes, cacheOpts...)
 		svc.PriceTicksModel = model.NewPriceTicksModel(conn, cacheNodes, cacheOpts...)
-		svc.PriceLatestModel = model.NewPriceLatestModel(conn, cacheNodes, cacheOpts...)
 		svc.AccountsModel = model.NewAccountsModel(conn, cacheNodes, cacheOpts...)
 		svc.AccountEquitySnapshotsModel = model.NewAccountEquitySnapshotsModel(conn, cacheNodes, cacheOpts...)
 		svc.PositionsModel = model.NewPositionsModel(conn, cacheNodes, cacheOpts...)
 		svc.TradesModel = model.NewTradesModel(conn, cacheNodes, cacheOpts...)
-		svc.ModelAnalyticsModel = model.NewModelAnalyticsModel(conn, cacheNodes, cacheOpts...)
 		svc.ConversationsModel = model.NewConversationsModel(conn, cacheNodes, cacheOpts...)
 		svc.ConversationMessagesModel = model.NewConversationMessagesModel(conn, cacheNodes, cacheOpts...)
 		svc.DecisionCyclesModel = model.NewDecisionCyclesModel(conn, cacheNodes, cacheOpts...)
 		svc.MarketAssetsModel = model.NewMarketAssetsModel(conn, cacheNodes, cacheOpts...)
-		svc.MarketAssetCtxModel = model.NewMarketAssetCtxModel(conn, cacheNodes, cacheOpts...)
 		svc.TraderStateModel = model.NewTraderStateModel(conn, cacheNodes, cacheOpts...)
+		svc.TraderConfigModel = model.NewTraderConfigModel(conn, cacheNodes, cacheOpts...)
+		svc.TraderConfigHistoryModel = model.NewTraderConfigHistoryModel(conn, cacheNodes, cacheOpts...)
+		svc.TraderRuntimeStateModel = model.NewTraderRuntimeStateModel(conn, cacheNodes, cacheOpts...)
+		svc.TraderSymbolCooldownsModel = model.NewTraderSymbolCooldownsModel(conn, cacheNodes, cacheOpts...)
+		if rawDB != nil {
+			svc.TraderConfigRepo = repo.NewTraderConfigRepository(
+				svc.TraderConfigModel,
+				svc.TraderConfigHistoryModel,
+				rawDB,
+			)
+		}
+		svc.TraderRuntimeRepo = repo.NewTraderRuntimeRepository(
+			svc.TraderRuntimeStateModel,
+			svc.TraderSymbolCooldownsModel,
+		)
 	}
 
 	return svc
